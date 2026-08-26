@@ -376,3 +376,71 @@ test("emoji and overflow expand from one measured message toolbar surface", asyn
     ),
   ).toBeLessThanOrEqual(1);
 });
+
+test("a message can be handed to Bestie with an optional note", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: [bestie] });
+  await page.setViewportSize({ width: 1000, height: 760 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const messageId = await page.evaluate(() => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    return emit({
+      channelName: "general",
+      content:
+        "Please fold this launch decision into tomorrow's priorities and name one owner.",
+      id: "d".repeat(64),
+    }).id;
+  });
+
+  const row = page.locator(`[data-message-id="${messageId}"]`);
+  await expect(row).toContainText("launch decision");
+  await row.hover();
+  await row.getByTestId(`send-to-bestie-${messageId}`).click();
+
+  const actionBar = row.getByTestId(`message-action-bar-${messageId}`);
+  const popover = page.getByTestId(`bestie-popover-${messageId}`);
+  await expect(actionBar).toHaveAttribute("data-bloom-surface", "bestie");
+  await expect(popover).toBeVisible();
+  await expect(popover).toContainText("Bestie");
+  await expect(popover).toContainText("Please fold this launch decision");
+
+  const snapshot = popover.getByTestId(`bestie-message-snapshot-${messageId}`);
+  const snapshotBody = popover.getByTestId(
+    `bestie-message-snapshot-body-${messageId}`,
+  );
+  const [popoverBox, snapshotBox, snapshotBodyBox] = await Promise.all([
+    popover.boundingBox(),
+    snapshot.boundingBox(),
+    snapshotBody.boundingBox(),
+  ]);
+  expect(popoverBox).not.toBeNull();
+  expect(snapshotBox).not.toBeNull();
+  expect(snapshotBodyBox).not.toBeNull();
+  if (popoverBox && snapshotBox && snapshotBodyBox) {
+    expect(popoverBox.width).toBeLessThanOrEqual(328);
+    expect(snapshotBox.width / (popoverBox.width - 32)).toBeCloseTo(0.75, 1);
+    expect(Math.abs(snapshotBox.x - (popoverBox.x + 16))).toBeLessThanOrEqual(
+      1,
+    );
+    expect(snapshotBox.height).toBeLessThan(64);
+    expect(snapshotBodyBox.height).toBeLessThanOrEqual(14);
+  }
+
+  const composer = popover.getByTestId("message-composer");
+  await expect(composer.getByRole("button", { name: "Send" })).toBeEnabled();
+  await composer
+    .locator('[contenteditable="true"]')
+    .fill("Make sure product and engineering agree on the owner.");
+  await composer.getByRole("button", { name: "Send" }).click();
+
+  await expect(popover).toBeHidden();
+  await page.getByTestId("open-bestie-dm").click();
+  const sentMessage = page.getByTestId("message-row").last();
+  await expect(sentMessage).toContainText(
+    "Make sure product and engineering agree on the owner.",
+  );
+  await expect(sentMessage).toContainText("Open original message");
+});

@@ -9,6 +9,11 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import {
+  BestieMessagePanel,
+  useBestieMessageAgent,
+} from "@/features/messages/ui/BestieMessagePopover";
 import type { MessageActionBarProps } from "@/features/messages/ui/MessageActionBar";
 import {
   MESSAGE_ACTION_BLOOM_EASE_OUT,
@@ -30,7 +35,7 @@ import {
 
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
-type ActiveSurface = "reactions" | "more" | null;
+type ActiveSurface = "reactions" | "bestie" | "more" | null;
 
 export function MessageActionBloomBar({
   channelId,
@@ -72,9 +77,11 @@ export function MessageActionBloomBar({
     "up" | "down"
   >("up");
   const reactionTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const bestieTriggerRef = React.useRef<HTMLButtonElement>(null);
   const moreTriggerRef = React.useRef<HTMLButtonElement>(null);
   const lastSurfaceRef = React.useRef<ActiveSurface>(null);
   const customEmoji = useCustomEmoji();
+  const bestie = useBestieMessageAgent();
   const quickReactionEmojis = useQuickReactionEmojis(3, customEmoji);
   const quickReactionItems = React.useMemo(
     () =>
@@ -135,6 +142,7 @@ export function MessageActionBloomBar({
     if (!restoreFocus) return;
     window.requestAnimationFrame(() => {
       if (surface === "reactions") reactionTriggerRef.current?.focus();
+      if (surface === "bestie") bestieTriggerRef.current?.focus();
       if (surface === "more") moreTriggerRef.current?.focus();
     });
   }, []);
@@ -432,6 +440,30 @@ export function MessageActionBloomBar({
               <TooltipContent>Reply</TooltipContent>
             </Tooltip>
           ) : null}
+          {bestie && canCopyMessageLink(message, channelId) ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="Send to Bestie"
+                  className={ACTION_BUTTON_CLASS}
+                  data-testid={`send-to-bestie-${message.id}`}
+                  onClick={() => openSurface("bestie")}
+                  ref={bestieTriggerRef}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  <ProfileAvatar
+                    avatarUrl={bestie.avatarUrl}
+                    className="size-5 text-3xs"
+                    label={bestie.name}
+                    testId={`bestie-action-avatar-${message.id}`}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Bestie</TooltipContent>
+            </Tooltip>
+          ) : null}
           {canCopyMessageLink(message, channelId) ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -524,6 +556,26 @@ export function MessageActionBloomBar({
                 onRemindLater={onRemindLater}
                 onSendToChannel={onSendToChannel}
                 onUnfollowThread={onUnfollowThread}
+              />
+            </motion.div>
+          ) : null}
+          {activeSurface === "bestie" && bestie && channelId ? (
+            <motion.div
+              {...panelMotion}
+              className={cn(
+                "absolute right-0",
+                expansionDirection === "up" ? "bottom-0" : "top-0",
+              )}
+              initial={false}
+              key="bestie"
+              ref={activeContentRef}
+              style={{ pointerEvents: contentReady ? "auto" : "none" }}
+            >
+              <BestieMessagePanel
+                bestie={bestie}
+                channelId={channelId}
+                message={message}
+                onClose={() => closeSurface()}
               />
             </motion.div>
           ) : null}
