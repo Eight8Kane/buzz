@@ -50,6 +50,7 @@ test("agent rows offer automatic mention controls", async () => {
   const props = {
     suggestions: [suggestion],
     selectedIndex: 0,
+    isEditorFocused: true,
     onSelect: (value) => selected.push(value),
     onToggleAlwaysAddressAgent: (value) => toggled.push(value),
     lockedAgentPubkeys: new Set(),
@@ -110,6 +111,7 @@ test("options expand in place without replacing the people list", async () => {
     React.createElement(MentionAutocomplete, {
       suggestions: [suggestion],
       selectedIndex: 0,
+      isEditorFocused: true,
       onSelect: () => {},
       keepMentionedAgentsPinned: true,
       onKeepMentionedAgentsPinnedChange: (value) => changes.push(value),
@@ -141,6 +143,7 @@ test("options expand in place without replacing the people list", async () => {
     React.createElement(MentionAutocomplete, {
       suggestions: [],
       selectedIndex: 0,
+      isEditorFocused: true,
       onSelect: () => {},
       keepMentionedAgentsPinned: false,
       onKeepMentionedAgentsPinnedChange: (value) => changes.push(value),
@@ -152,6 +155,7 @@ test("options expand in place without replacing the people list", async () => {
     React.createElement(MentionAutocomplete, {
       suggestions: [suggestion],
       selectedIndex: 0,
+      isEditorFocused: true,
       onSelect: () => {},
       keepMentionedAgentsPinned: false,
       onKeepMentionedAgentsPinnedChange: (value) => changes.push(value),
@@ -193,6 +197,7 @@ test("clicking outside dismisses the tray without intercepting its trigger", asy
         React.createElement(MentionAutocomplete, {
           suggestions: [suggestion],
           selectedIndex: 0,
+          isEditorFocused: true,
           onDismiss: () => {
             dismissCount += 1;
           },
@@ -252,6 +257,7 @@ test("collision npubs sit inline with agent metadata", async () => {
     React.createElement(MentionAutocomplete, {
       suggestions,
       selectedIndex: 0,
+      isEditorFocused: true,
       onSelect: () => {},
     }),
   );
@@ -301,6 +307,7 @@ test("does not intercept Tab from the editor", async () => {
         React.createElement(MentionAutocomplete, {
           suggestions,
           selectedIndex: 1,
+          isEditorFocused: true,
           onSelect: () => {},
           onToggleAlwaysAddressAgent: () => {},
         }),
@@ -314,6 +321,35 @@ test("does not intercept Tab from the editor", async () => {
 
   assert.equal(wasNotCancelled, true);
   assert.equal(document.activeElement, input);
+});
+
+test("renders nothing while the editor is unfocused", async () => {
+  const React = await import("react");
+  const { render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const props = {
+    suggestions: [
+      {
+        pubkey: "agent-pubkey",
+        displayName: "Agent Ada",
+        isAgent: true,
+      },
+    ],
+    selectedIndex: 0,
+    isEditorFocused: false,
+    onSelect: () => {},
+  };
+  const view = render(React.createElement(MentionAutocomplete, props));
+
+  assert.equal(view.queryByTestId("mention-autocomplete-layer"), null);
+
+  view.rerender(
+    React.createElement(MentionAutocomplete, {
+      ...props,
+      isEditorFocused: true,
+    }),
+  );
+  assert.ok(view.getByTestId("mention-autocomplete-layer"));
 });
 function suggestion(agentProvenance) {
   return {
