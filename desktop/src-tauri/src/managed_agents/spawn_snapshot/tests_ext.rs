@@ -291,3 +291,91 @@ fn known_runtime_still_strips_native_effort_env_from_snapshot() {
         "the known runtime's effort must land solely in the effort_level field"
     );
 }
+
+#[test]
+fn custom_runtime_mixed_case_sentinel_is_captured_not_lost() {
+    // Regression (external review, Carl, P2): for an unknown/custom runtime the
+    // launch projection uses an EMPTY suppress set, so a user-set mixed-case
+    // `buzz_acp_effort_level` survives into `descriptor.env` and the child reads
+    // it as `BUZZ_ACP_EFFORT_LEVEL` on Windows. `effective_effort` now reads the
+    // sentinel case-insensitively (exact-first `get_ci`), so it captures that
+    // pass-through value into `effort_level` — matching the case-insensitive
+    // snapshot strip. Before the fix the exact-case read missed the mixed-case
+    // key while the strip still removed it, so the value vanished from BOTH
+    // fields and an edit produced no restart diff.
+    let mut high = custom_command_record();
+    high.env_vars
+        .insert("buzz_acp_effort_level".into(), "high".into());
+    let canonical = snap(&high);
+    assert_eq!(
+        canonical.get("effort_level").and_then(|v| v.as_str()),
+        Some("high"),
+        "a mixed-case pass-through sentinel must be captured into effort_level"
+    );
+    assert_eq!(
+        canonical
+            .get("env")
+            .and_then(|env| env.get("buzz_acp_effort_level")),
+        None,
+        "the sentinel is the projection's dest key and is stripped from env once represented"
+    );
+
+    // The mutation pin: editing the mixed-case sentinel must trip the badge.
+    // Reverting the fix (exact-case read + case-insensitive strip) makes both
+    // snapshots carry `effort_level = null` with the key stripped, so they
+    // compare equal and this assertion fails.
+    let mut low = custom_command_record();
+    low.env_vars
+        .insert("buzz_acp_effort_level".into(), "low".into());
+    assert_ne!(
+        snap(&low),
+        canonical,
+        "editing a mixed-case custom-runtime sentinel must trip the restart badge"
+    );
+}
+
+#[test]
+fn custom_runtime_canonical_column_wins_over_mixed_case_sentinel() {
+    // The with-canonical-column collision case Carl asked for. A custom runtime
+    // resolves its effective effort over the canonical column (the sentinel is
+    // transport for an unknown runtime, never an authority tier), and the
+    // projection emits that value under the canonical `BUZZ_ACP_EFFORT_LEVEL`.
+    // `effective_effort`'s exact-first `get_ci` reads that canonical emission,
+    // so the column wins `effort_level` — the one representation matching the
+    // value the adapter reads on its canonical sentinel key. Both case variants
+    // are then stripped from `env`, leaving no duplicate effort representation.
+    let mut high_col = custom_command_record();
+    high_col.effort_level = Some("high".into());
+    high_col
+        .env_vars
+        .insert("buzz_acp_effort_level".into(), "low".into());
+    let canonical = snap(&high_col);
+    assert_eq!(
+        canonical.get("effort_level").and_then(|v| v.as_str()),
+        Some("high"),
+        "the canonical column wins effort_level over the pass-through sentinel"
+    );
+    let env = canonical.get("env").expect("snapshot has an env object");
+    assert_eq!(
+        env.get("BUZZ_ACP_EFFORT_LEVEL"),
+        None,
+        "the projection-emitted canonical sentinel is stripped from env"
+    );
+    assert_eq!(
+        env.get("buzz_acp_effort_level"),
+        None,
+        "the user's mixed-case sentinel duplicate is stripped case-insensitively"
+    );
+
+    // Editing the authority (the column) still trips the badge.
+    let mut low_col = custom_command_record();
+    low_col.effort_level = Some("low".into());
+    low_col
+        .env_vars
+        .insert("buzz_acp_effort_level".into(), "low".into());
+    assert_ne!(
+        snap(&low_col),
+        canonical,
+        "editing the canonical column must trip the restart badge"
+    );
+}

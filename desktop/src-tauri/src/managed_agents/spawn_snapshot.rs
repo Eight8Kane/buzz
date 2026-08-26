@@ -153,7 +153,15 @@ pub(crate) struct SpawnConfigSnapshot {
 pub(crate) fn effective_effort(descriptor: &EffectiveHarnessDescriptor) -> Option<String> {
     let runtime = known_acp_runtime(&descriptor.command);
     let dest_key = super::config_bridge::effort::effort_dest_key(runtime);
-    descriptor.env.get(dest_key).cloned()
+    // Read case-insensitively (exact-first) so a mixed-case sentinel a custom
+    // runtime passed through (the projection uses an EMPTY suppress set, so a
+    // user-set `buzz_acp_effort_level` survives into `descriptor.env` and the
+    // child reads it as `BUZZ_ACP_EFFORT_LEVEL` on Windows) is captured here.
+    // The read must match the snapshot strip, which is also case-insensitive:
+    // if the read were exact-case it would miss the mixed-case sentinel, the
+    // strip would still remove it, and the value would land in neither
+    // `snapshot.env` nor `effort_level` — producing no restart diff on an edit.
+    super::config_bridge::effort::get_ci(&descriptor.env, dest_key).cloned()
 }
 
 impl SpawnConfigSnapshot {

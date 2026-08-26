@@ -85,7 +85,7 @@ impl EffortLaunch {
 /// then falls back to the first case-insensitive match. Effort key resolution
 /// must match Windows `Command` env semantics, where a mixed-case native key
 /// is the same variable as its canonical form.
-pub(super) fn get_ci<'a>(map: &'a BTreeMap<String, String>, key: &str) -> Option<&'a String> {
+pub(crate) fn get_ci<'a>(map: &'a BTreeMap<String, String>, key: &str) -> Option<&'a String> {
     map.get(key).or_else(|| {
         map.iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
