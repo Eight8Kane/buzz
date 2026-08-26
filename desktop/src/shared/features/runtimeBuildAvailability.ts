@@ -8,7 +8,7 @@ import { resolveEnabled } from "./resolveEnabled";
 import type { FeatureDefinition } from "./types";
 
 const runtimeBuildFlags: FeatureBuildFlags = {
-  bestie: import.meta.env.VITE_BUZZ_BESTIE === "1",
+  bestie: import.meta.env?.VITE_BUZZ_BESTIE === "1",
 };
 
 export function isFeatureAvailableInThisBuild(

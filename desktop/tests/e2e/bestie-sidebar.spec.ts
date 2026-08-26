@@ -317,3 +317,62 @@ test("a delayed Bestie open is scoped to its rendered community and signer", asy
   await expect(page.getByTestId("chat-title")).toHaveCount(0);
   await expect(page.getByTestId("open-bestie-dm")).toHaveCount(0);
 });
+
+test("emoji and overflow expand from one measured message toolbar surface", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: [bestie] });
+  await page.setViewportSize({ width: 1000, height: 760 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const messageId = await page.evaluate(() => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    return emit({
+      channelName: "general",
+      content: "Bloom architecture check",
+      id: "c".repeat(64),
+    }).id;
+  });
+
+  const row = page.locator(`[data-message-id="${messageId}"]`);
+  await expect(row).toContainText("Bloom architecture check");
+  await row.hover();
+  const container = row.getByTestId(
+    `message-action-bloom-container-${messageId}`,
+  );
+  const closedBox = await container.boundingBox();
+  expect(closedBox).not.toBeNull();
+  await row.getByTestId(`react-message-${messageId}`).click();
+  await expect(
+    row.getByTestId(`reaction-bloom-panel-${messageId}`),
+  ).toBeVisible();
+  await expect(container).toHaveAttribute("popover", "manual");
+  await expect(
+    row.locator(`[data-testid="message-action-bloom-container-${messageId}"]`),
+  ).toHaveCount(1);
+  const reactionBox = await container.boundingBox();
+  expect(reactionBox).not.toBeNull();
+  expect(
+    Math.abs(
+      (closedBox?.x ?? 0) +
+        (closedBox?.width ?? 0) -
+        ((reactionBox?.x ?? 0) + (reactionBox?.width ?? 0)),
+    ),
+  ).toBeLessThanOrEqual(1);
+
+  await page.keyboard.press("Escape");
+  await row.getByTestId(`more-actions-${messageId}`).click();
+  await expect(
+    row.getByTestId(`more-actions-panel-${messageId}`),
+  ).toBeVisible();
+  const overflowBox = await container.boundingBox();
+  expect(overflowBox).not.toBeNull();
+  expect(
+    Math.abs(
+      (closedBox?.x ?? 0) +
+        (closedBox?.width ?? 0) -
+        ((overflowBox?.x ?? 0) + (overflowBox?.width ?? 0)),
+    ),
+  ).toBeLessThanOrEqual(1);
+});
