@@ -294,15 +294,16 @@ fn known_runtime_still_strips_native_effort_env_from_snapshot() {
 
 #[test]
 fn custom_runtime_mixed_case_sentinel_is_captured_not_lost() {
-    // Regression (external review, Carl, P2): for an unknown/custom runtime the
-    // launch projection uses an EMPTY suppress set, so a user-set mixed-case
-    // `buzz_acp_effort_level` survives into `descriptor.env` and the child reads
-    // it as `BUZZ_ACP_EFFORT_LEVEL` on Windows. `effective_effort` now reads the
-    // sentinel case-insensitively (exact-first `get_ci`), so it captures that
-    // pass-through value into `effort_level` — matching the case-insensitive
-    // snapshot strip. Before the fix the exact-case read missed the mixed-case
-    // key while the strip still removed it, so the value vanished from BOTH
-    // fields and an edit produced no restart diff.
+    // Regression (external review, Carl, P2): for an unknown/custom runtime a
+    // user-set mixed-case `buzz_acp_effort_level` (no column) must not vanish.
+    // The launch projection now reconciles it — stripping the mixed-case
+    // spelling and re-emitting the pass-through value under the canonical
+    // `BUZZ_ACP_EFFORT_LEVEL` (see `effort_tests::
+    // unknown_runtime_collapses_mixed_case_sentinel_to_canonical_when_no_column`)
+    // — so `descriptor.env` carries exactly one canonical sentinel. The snapshot
+    // captures it into `effort_level` and strips it from `env`. Before the r4/r5
+    // fixes the mixed-case key survived while the exact-case read missed it, so
+    // the value vanished from BOTH fields and an edit produced no restart diff.
     let mut high = custom_command_record();
     high.env_vars
         .insert("buzz_acp_effort_level".into(), "high".into());
@@ -321,9 +322,10 @@ fn custom_runtime_mixed_case_sentinel_is_captured_not_lost() {
     );
 
     // The mutation pin: editing the mixed-case sentinel must trip the badge.
-    // Reverting the fix (exact-case read + case-insensitive strip) makes both
-    // snapshots carry `effort_level = null` with the key stripped, so they
-    // compare equal and this assertion fails.
+    // Reverting the fix (exact-case read + case-insensitive strip, or an empty
+    // unknown-runtime suppress set) makes both snapshots carry
+    // `effort_level = null` with the key stripped, so they compare equal and
+    // this assertion fails.
     let mut low = custom_command_record();
     low.env_vars
         .insert("buzz_acp_effort_level".into(), "low".into());
@@ -336,14 +338,15 @@ fn custom_runtime_mixed_case_sentinel_is_captured_not_lost() {
 
 #[test]
 fn custom_runtime_canonical_column_wins_over_mixed_case_sentinel() {
-    // The with-canonical-column collision case Carl asked for. A custom runtime
-    // resolves its effective effort over the canonical column (the sentinel is
-    // transport for an unknown runtime, never an authority tier), and the
-    // projection emits that value under the canonical `BUZZ_ACP_EFFORT_LEVEL`.
-    // `effective_effort`'s exact-first `get_ci` reads that canonical emission,
-    // so the column wins `effort_level` — the one representation matching the
-    // value the adapter reads on its canonical sentinel key. Both case variants
-    // are then stripped from `env`, leaving no duplicate effort representation.
+    // The with-canonical-column collision case Carl asked for, verified at the
+    // SNAPSHOT here and — decisively — at the projection/descriptor seam in
+    // `effort_tests::unknown_runtime_column_wins_over_mixed_case_sentinel`. The
+    // projection strips every case variant of the sentinel before emitting the
+    // column value, so `descriptor.env` carries exactly `BUZZ_ACP_EFFORT_LEVEL=
+    // <column>` and the child receives the column value on every platform (no
+    // lowercase variant survives for Windows to case-fold over the canonical
+    // key). This snapshot therefore reads the same truth the child gets: the
+    // column wins `effort_level` and both case variants are absent from `env`.
     let mut high_col = custom_command_record();
     high_col.effort_level = Some("high".into());
     high_col

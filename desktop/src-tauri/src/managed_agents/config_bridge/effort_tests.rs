@@ -475,15 +475,18 @@ fn buzz_agent_generic_column_does_not_leak_acp_sentinel() {
 #[test]
 fn unknown_runtime_does_not_suppress_user_effort_env() {
     // Regression: a custom wrapper with GOOSE_THINKING_EFFORT=high in record env
-    // must receive it unchanged. On main an unset column left env untouched;
-    // the projection must not strip effort keys for a runtime it has no
-    // metadata for (empty suppress set = pass-through).
+    // must receive it unchanged. On main an unset column left env untouched; the
+    // projection must not strip a foreign effort key for a runtime it has no
+    // metadata for. Only our own ACP-startup sentinel is reconciled (external
+    // review, Carl P2), so `suppress` is exactly `[BUZZ_ACP_EFFORT_LEVEL]` — no
+    // foreign key.
     let mut r = record();
     r.env_vars = env(&[(GOOSE_KEY, "high"), ("UNRELATED", "keep")]);
     let launch = project_record_only(&r, None);
-    assert!(
-        launch.suppress.is_empty(),
-        "unknown runtime suppresses nothing"
+    assert_eq!(
+        launch.suppress,
+        vec![ACP_KEY],
+        "unknown runtime suppresses only its own sentinel, never a foreign key"
     );
 
     let mut launch_env = r.env_vars.clone();
@@ -502,12 +505,14 @@ fn unknown_runtime_does_not_suppress_user_effort_env() {
 #[test]
 fn unknown_runtime_keeps_user_acp_sentinel_when_no_column() {
     // A custom adapter with a hand-set BUZZ_ACP_EFFORT_LEVEL and no canonical
-    // column keeps its sentinel — nothing to project, nothing suppressed.
+    // column keeps its sentinel value: nothing to project, but the pass-through
+    // is preserved and re-emitted canonically so the child still receives it.
     let mut r = record();
     r.env_vars = env(&[(ACP_KEY, "low")]);
     let launch = project_record_only(&r, None);
-    // No column → no projected value → nothing emitted, nothing stripped.
+    // No column → no projected value; the sentinel is carried through `apply`.
     assert_eq!(launch.value, None);
+    assert!(launch.preserve_passthrough);
     let mut launch_env = r.env_vars.clone();
     launch.apply(&mut launch_env);
     assert_eq!(
@@ -515,6 +520,63 @@ fn unknown_runtime_keeps_user_acp_sentinel_when_no_column() {
         Some("low"),
         "hand-set sentinel survives on an unknown runtime with no column"
     );
+}
+
+#[test]
+fn unknown_runtime_collapses_mixed_case_sentinel_to_canonical_when_no_column() {
+    // External review, Carl P2 (no-column half): a hand-set MIXED-CASE sentinel
+    // on a custom runtime must survive AND be normalized to the canonical
+    // spelling. Windows `Command` case-folds env names, so leaving the lowercase
+    // variant would hand the child a value the exact-case snapshot read misses.
+    // After the projection exactly one canonical spelling remains, carrying the
+    // pass-through value — so child, snapshot, and badge cannot disagree on case.
+    let mut r = record();
+    r.env_vars = env(&[("buzz_acp_effort_level", "low")]);
+    let launch = project_record_only(&r, None);
+    assert_eq!(launch.value, None);
+    let mut launch_env = r.env_vars.clone();
+    launch.apply(&mut launch_env);
+    assert_eq!(
+        launch_env.get(ACP_KEY).map(String::as_str),
+        Some("low"),
+        "the mixed-case pass-through sentinel is re-emitted under the canonical key"
+    );
+    assert_eq!(
+        launch_env.get("buzz_acp_effort_level"),
+        None,
+        "the mixed-case spelling is collapsed away, leaving exactly one sentinel"
+    );
+}
+
+#[test]
+fn unknown_runtime_column_wins_over_mixed_case_sentinel() {
+    // External review, Carl P2 (with-column half): a canonical column plus a
+    // hand-set mixed-case sentinel. The column is the authority (the sentinel is
+    // transport for an unknown runtime), and the projection must strip EVERY case
+    // variant of the sentinel before emitting the column value — so the child
+    // receives the column value, not the shadowing lowercase variant Windows
+    // would otherwise fold onto the canonical key.
+    let mut r = record();
+    r.effort_level = Some("high".into());
+    r.env_vars = env(&[("buzz_acp_effort_level", "low")]);
+    let launch = project_record_only(&r, None);
+    assert_eq!(launch.value.as_deref(), Some("high"));
+    assert_eq!(launch.key, ACP_KEY);
+    let mut launch_env = r.env_vars.clone();
+    launch.apply(&mut launch_env);
+    assert_eq!(
+        launch_env.get(ACP_KEY).map(String::as_str),
+        Some("high"),
+        "the column value wins and is emitted under the canonical sentinel key"
+    );
+    assert_eq!(
+        launch_env.get("buzz_acp_effort_level"),
+        None,
+        "the shadowing mixed-case sentinel is stripped so the column truly wins"
+    );
+    // Mutation: reverting the unknown-runtime suppress set to empty leaves
+    // `buzz_acp_effort_level=low` in the child env, so the column would NOT win
+    // on Windows and this case-variant assertion fails.
 }
 
 #[test]

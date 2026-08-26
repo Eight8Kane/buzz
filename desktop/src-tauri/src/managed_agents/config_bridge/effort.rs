@@ -58,6 +58,13 @@ pub(crate) struct EffortLaunch {
     /// Always includes the sentinel and all known native/legacy effort keys, so
     /// no foreign or transport effort key can shadow the projected authority.
     pub suppress: Vec<&'static str>,
+    /// When no tier resolved a `value`, preserve a value the launch env already
+    /// carries under `key` (collapsing every case variant to the canonical
+    /// spelling). Set only for unknown/custom runtimes, where the ACP sentinel
+    /// is user pass-through transport that must survive a spawn — not a foreign
+    /// key to drop. Known runtimes leave it `false`: a bare destination-key
+    /// value with no resolved authority is invalid/foreign and is dropped.
+    pub preserve_passthrough: bool,
 }
 
 impl EffortLaunch {
@@ -68,14 +75,24 @@ impl EffortLaunch {
     /// Suppression is ASCII-case-insensitive: Windows `Command` case-folds env
     /// names, so a hand-set `goose_thinking_effort` would otherwise evade an
     /// exact-case strip and shadow the projected authority.
+    ///
+    /// When `preserve_passthrough` is set and no tier resolved a value, a value
+    /// already present under `key` (in any case) is carried forward and
+    /// re-emitted canonically — read from the fully layered env, so the
+    /// surviving value is exactly what the child would receive after Windows
+    /// case-folds duplicate spellings. This keeps an unknown/custom runtime's
+    /// hand-set sentinel alive while guaranteeing one canonical spelling.
     pub(crate) fn apply(&self, env: &mut BTreeMap<String, String>) {
+        let carried = (self.value.is_none() && self.preserve_passthrough)
+            .then(|| get_ci(env, self.key).cloned())
+            .flatten();
         env.retain(|k, _| {
             !self
                 .suppress
                 .iter()
                 .any(|suppressed| k.eq_ignore_ascii_case(suppressed))
         });
-        if let Some(ref v) = self.value {
+        if let Some(v) = self.value.as_ref().or(carried.as_ref()) {
             env.insert(self.key.to_string(), v.clone());
         }
     }
@@ -213,11 +230,12 @@ pub(crate) fn effort_suppress_keys() -> Vec<&'static str> {
 ///   every effort key to the single destination key, so this removes only that
 ///   destination key (a no-op on the already-swept siblings).
 /// - **unknown/custom runtime** — only the ACP-startup sentinel. The projection
-///   used an EMPTY suppress set here (external-review-#2 pass-through), leaving
-///   every other effort-looking key (e.g. a hand-rolled `GOOSE_THINKING_EFFORT`)
-///   untouched as ordinary env. Those must remain in `env` so an edit to them
-///   diffs the snapshot normally; only the sentinel — the key the projection
-///   emits and `effective_effort` reads into `effort_level` — is removed.
+///   suppresses just the sentinel here (reconciling every case variant to the
+///   canonical spelling — external review, Carl P2), leaving every other
+///   effort-looking key (e.g. a hand-rolled `GOOSE_THINKING_EFFORT`) untouched
+///   as ordinary env. Those must remain in `env` so an edit to them diffs the
+///   snapshot normally; only the sentinel — the key the projection emits and
+///   `effective_effort` reads into `effort_level` — is removed.
 pub(crate) fn snapshot_suppress_keys(runtime: Option<&KnownAcpRuntime>) -> Vec<&'static str> {
     if runtime.is_some() {
         effort_suppress_keys()
@@ -243,20 +261,29 @@ pub(crate) fn effort_launch_projection(
 ) -> EffortLaunch {
     let key = effort_dest_key(runtime);
 
-    // Fix (external review #2): unknown/custom runtimes restore main's
-    // pass-through. With no runtime metadata there is no vocabulary to bridge
-    // and no known env-tier authority, so suppressing every effort key would
-    // silently strip a working custom-wrapper key (e.g. `GOOSE_THINKING_EFFORT`
-    // on a hand-rolled Goose adapter). An empty suppress set leaves user and
-    // definition effort env untouched; the raw canonical column still emits
-    // under `BUZZ_ACP_EFFORT_LEVEL` (the retained compatibility path), matching
-    // main. KNOWN runtimes — including Claude/Codex with `thinking_env_var:
-    // None` — keep the full sweep + single-key emission.
+    // Suppress the full effort vocabulary for KNOWN runtimes. For an
+    // unknown/custom runtime (external review #2) we keep every foreign
+    // effort-looking key as pass-through — a hand-rolled `GOOSE_THINKING_EFFORT`
+    // on a custom Goose wrapper must reach the child untouched — EXCEPT our own
+    // ACP-startup sentinel, which we always reconcile to a single canonical
+    // spelling (external review, Carl P2): the projection emits the sentinel, so
+    // a user-set case variant (e.g. `buzz_acp_effort_level`) is never intentional
+    // config, and leaving one to shadow the emitted `BUZZ_ACP_EFFORT_LEVEL` on
+    // Windows (where `Command` case-folds env names) would hand the child a
+    // different value than the snapshot reads. Stripping the sentinel here and
+    // re-emitting canonically guarantees at most ONE sentinel spelling downstream,
+    // so the child, the restart snapshot, and the badge cannot disagree on case.
     let suppress = if runtime.is_some() {
         effort_suppress_keys()
     } else {
-        Vec::new()
+        vec![ACP_STARTUP_EFFORT_KEY]
     };
+    // When no tier resolves a value, an unknown runtime still preserves a
+    // hand-set sentinel the user routed to the child (the retained pass-through
+    // from external review #2) — carried forward and re-emitted canonically by
+    // `apply`. Known runtimes never preserve a bare dest-key value: it is either
+    // the projection's own emission or a foreign key, both handled by `value`.
+    let preserve_passthrough = runtime.is_none();
 
     // Value gate: Goose canonicalizes through its alias contract; buzz-agent
     // validates against its accepted set (invalid → skip, so a foreign
@@ -286,6 +313,7 @@ pub(crate) fn effort_launch_projection(
         value,
         key,
         suppress,
+        preserve_passthrough,
     }
 }
 
