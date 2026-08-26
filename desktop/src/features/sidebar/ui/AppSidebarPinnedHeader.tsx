@@ -1,5 +1,9 @@
 import { Activity, Bot, Folders, Inbox, Zap } from "lucide-react";
+import * as React from "react";
 
+import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import { pickBestieAgent } from "@/features/agents/lib/bestie";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
 import { FeatureGate } from "@/shared/features";
@@ -39,7 +43,9 @@ type AppSidebarPinnedHeaderProps = {
 };
 
 type AppSidebarPrimaryMenuProps = {
+  bestieRelayUrl?: string | null;
   homeBadgeCount: number;
+  onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onSelectAgents: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
@@ -89,7 +95,9 @@ export function AppSidebarPinnedHeader({
 }
 
 export function AppSidebarPrimaryMenu({
+  bestieRelayUrl,
   homeBadgeCount,
+  onOpenDm,
   onSelectAgents,
   onSelectHome,
   onSelectProjects,
@@ -167,6 +175,12 @@ export function AppSidebarPrimaryMenu({
               <SidebarMenuLabel>Agents</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          <FeatureGate feature="bestie">
+            <BestieSidebarMenuItem
+              onOpenDm={onOpenDm}
+              relayUrl={bestieRelayUrl}
+            />
+          </FeatureGate>
           <FeatureGate feature="workflows">
             <SidebarMenuItem>
               <SidebarMenuButton
@@ -185,5 +199,41 @@ export function AppSidebarPrimaryMenu({
       </SidebarHeader>
       <SidebarProjectsSection />
     </>
+  );
+}
+
+function BestieSidebarMenuItem({
+  onOpenDm,
+  relayUrl,
+}: {
+  onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
+  relayUrl?: string | null;
+}) {
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const bestieAgent = React.useMemo(
+    () => pickBestieAgent(managedAgentsQuery.data ?? [], relayUrl),
+    [managedAgentsQuery.data, relayUrl],
+  );
+
+  if (!bestieAgent) return null;
+
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        data-testid="open-bestie-dm"
+        onClick={() => void onOpenDm({ pubkeys: [bestieAgent.pubkey] })}
+        tooltip={`Message ${bestieAgent.name}`}
+        type="button"
+      >
+        <ProfileAvatar
+          avatarUrl={bestieAgent.avatarUrl}
+          className="size-4 text-3xs shadow-none"
+          label={bestieAgent.name}
+          plain
+          testId="bestie-sidebar-avatar"
+        />
+        <SidebarMenuLabel>Bestie</SidebarMenuLabel>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
   );
 }
