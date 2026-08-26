@@ -549,6 +549,37 @@ fn unknown_runtime_collapses_mixed_case_sentinel_to_canonical_when_no_column() {
 }
 
 #[test]
+fn unknown_runtime_no_column_multi_variant_preserves_windows_effective_value() {
+    // Pass-3 IMPORTANT (Thufir): both case spellings of the sentinel survive the
+    // case-sensitive layer merge — a lower-tier canonical `BUZZ_ACP_EFFORT_LEVEL`
+    // plus a higher-tier record override `buzz_acp_effort_level` — with NO column.
+    // The carry must preserve the value the Windows child would actually receive.
+    // Rust's `Command` writes each spelling in `BTreeMap` iteration order into a
+    // case-folded env map (last set wins); canonical `B` sorts before lowercase
+    // `b`, so the lowercase/higher-tier `low` is written last and wins. The carry
+    // selects the LAST case-insensitive match in iteration order, matching that.
+    let mut r = record();
+    r.env_vars = env(&[(ACP_KEY, "high"), ("buzz_acp_effort_level", "low")]);
+    let launch = project_record_only(&r, None);
+    assert_eq!(launch.value, None);
+    assert!(launch.preserve_passthrough);
+    let mut launch_env = r.env_vars.clone();
+    launch.apply(&mut launch_env);
+    assert_eq!(
+        launch_env.get(ACP_KEY).map(String::as_str),
+        Some("low"),
+        "the carry preserves the last-in-iteration-order value the Windows child receives"
+    );
+    assert_eq!(
+        launch_env.get("buzz_acp_effort_level"),
+        None,
+        "every case variant collapses to exactly one canonical sentinel"
+    );
+    // Mutation: reverting the carry to exact-first `get_ci` selects canonical
+    // `high` instead, inverting the pass-through value and re-breaking this pin.
+}
+
+#[test]
 fn unknown_runtime_column_wins_over_mixed_case_sentinel() {
     // External review, Carl P2 (with-column half): a canonical column plus a
     // hand-set mixed-case sentinel. The column is the authority (the sentinel is

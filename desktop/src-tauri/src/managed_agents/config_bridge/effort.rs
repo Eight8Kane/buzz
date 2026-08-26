@@ -78,13 +78,23 @@ impl EffortLaunch {
     ///
     /// When `preserve_passthrough` is set and no tier resolved a value, a value
     /// already present under `key` (in any case) is carried forward and
-    /// re-emitted canonically — read from the fully layered env, so the
-    /// surviving value is exactly what the child would receive after Windows
-    /// case-folds duplicate spellings. This keeps an unknown/custom runtime's
-    /// hand-set sentinel alive while guaranteeing one canonical spelling.
+    /// re-emitted canonically. Multiple case spellings can survive the
+    /// case-sensitive layer merge (e.g. a lower-tier `BUZZ_ACP_EFFORT_LEVEL`
+    /// plus a higher-tier `buzz_acp_effort_level`); the carry selects the LAST
+    /// case-insensitive match in `BTreeMap` iteration order, which is exactly
+    /// the value Rust's Windows `Command` writer produces — it sets each spelling
+    /// in iteration order into a case-folded env map, so the last set wins. This
+    /// keeps an unknown/custom runtime's hand-set sentinel alive, preserves the
+    /// value the child would actually receive, and guarantees one canonical
+    /// spelling downstream.
     pub(crate) fn apply(&self, env: &mut BTreeMap<String, String>) {
         let carried = (self.value.is_none() && self.preserve_passthrough)
-            .then(|| get_ci(env, self.key).cloned())
+            .then(|| {
+                env.iter()
+                    .rev()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(self.key))
+                    .map(|(_, v)| v.clone())
+            })
             .flatten();
         env.retain(|k, _| {
             !self

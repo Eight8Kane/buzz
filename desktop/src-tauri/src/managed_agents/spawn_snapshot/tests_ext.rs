@@ -228,8 +228,9 @@ fn canonical_effort_edit_changes_snapshot() {
 }
 
 /// A custom-command record whose runtime matches no known ACP runtime, so the
-/// launch projection uses an EMPTY suppress set (external-review-#2
-/// pass-through) and the child actually receives its raw effort env.
+/// launch projection suppresses ONLY its own ACP sentinel (external-review-#2
+/// pass-through, r5): every foreign effort key survives untouched and the child
+/// receives its raw effort env.
 fn custom_command_record() -> ManagedAgentRecord {
     let mut rec = record();
     rec.agent_command_override = Some("/opt/custom/my-agent".into());
@@ -239,9 +240,9 @@ fn custom_command_record() -> ManagedAgentRecord {
 #[test]
 fn custom_runtime_effort_env_stays_in_snapshot_and_diffs() {
     // Regression (external review, Carl): for an unknown/custom runtime the
-    // launch projection strips NO effort key, so the child receives the raw
-    // `GOOSE_THINKING_EFFORT` from the wrapper's env. The snapshot must retain
-    // that key as ordinary env — the projection consumed nothing into
+    // launch projection strips only its own ACP sentinel, so the child receives
+    // the raw `GOOSE_THINKING_EFFORT` from the wrapper's env. The snapshot must
+    // retain that key as ordinary env — the projection consumed nothing into
     // `effort_level` (its dest key, the ACP sentinel, is absent) — so an edit to
     // it diffs the snapshot and fires the restart badge. The prior full strip
     // erased the key from both places, producing NO restart diff on an effort
