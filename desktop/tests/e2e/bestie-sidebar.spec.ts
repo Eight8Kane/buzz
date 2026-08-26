@@ -82,6 +82,52 @@ test("the disabled Bestie experiment does not mount the sidebar entry", async ({
   await page.goto("/");
 
   await expect(page.getByTestId("open-bestie-dm")).toHaveCount(0);
+  await expect(page.getByTestId("open-bestie-panel")).toHaveCount(0);
+  await page.keyboard.press("Meta+1");
+  await expect(page.getByTestId("bestie-chat-popover")).toHaveCount(0);
+});
+
+test("the app-level avatar and command shortcut share one Bestie conversation", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: [bestie] });
+  await page.setViewportSize({ width: 1000, height: 760 });
+  await page.goto("/");
+
+  const trigger = page.getByTestId("open-bestie-panel");
+  const topChrome = page.getByTestId("app-top-chrome");
+  await expect(trigger).toBeVisible();
+  await expect(trigger).toHaveAccessibleName("Open Bestie chat");
+
+  const [triggerBox, chromeBox] = await Promise.all([
+    trigger.boundingBox(),
+    topChrome.boundingBox(),
+  ]);
+  expect(triggerBox).not.toBeNull();
+  expect(chromeBox).not.toBeNull();
+  expect(triggerBox?.x).toBeGreaterThan((chromeBox?.x ?? 0) + 800);
+  expect(triggerBox?.y).toBeGreaterThanOrEqual(chromeBox?.y ?? 0);
+  expect((triggerBox?.y ?? 0) + (triggerBox?.height ?? 0)).toBeLessThanOrEqual(
+    (chromeBox?.y ?? 0) + (chromeBox?.height ?? 0),
+  );
+
+  const popover = page.getByTestId("bestie-chat-popover");
+  await page.keyboard.press("Meta+1");
+  await expect(popover).toBeVisible();
+  await expect(popover).toContainText("Bestie");
+  await page.keyboard.press("Meta+1");
+  await expect(popover).toBeHidden();
+  await trigger.click();
+  await expect(popover).toBeVisible();
+
+  const composer = popover.getByTestId("message-composer");
+  const editor = composer.locator('[contenteditable="true"]');
+  await expect(editor).toBeEditable();
+  await editor.fill("Keep this decision close at hand.");
+  await composer.getByRole("button", { name: "Send" }).click();
+  await expect(popover.getByTestId("message-row").last()).toContainText(
+    "Keep this decision close at hand.",
+  );
 });
 
 test("a delayed Bestie open is scoped to its rendered community and signer", async ({
