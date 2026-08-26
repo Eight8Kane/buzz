@@ -1,4 +1,6 @@
 pub mod agent_management;
+pub mod backend;
+pub mod broker_client;
 mod client;
 mod commands;
 mod error;
