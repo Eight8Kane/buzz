@@ -192,7 +192,10 @@ export function ComposerMentionButton({
                 data-testid="message-insert-mention"
                 disabled={disabled}
                 onClick={onOpen}
-                onMouseDown={onCaptureSelection}
+                onMouseDown={(event) => {
+                  onCaptureSelection();
+                  event.preventDefault();
+                }}
                 type="button"
               >
                 <AtSign aria-hidden="true" className="h-4 w-4 shrink-0" />
@@ -297,6 +300,7 @@ export function ComposerMentionButton({
           <button
             className="shrink-0 rounded-md px-1.5 py-1 font-medium text-primary outline-hidden hover:bg-primary/10 focus-visible:ring-1 focus-visible:ring-ring"
             onClick={onConfirmationTurnOff}
+            onMouseDown={(event) => event.preventDefault()}
             type="button"
           >
             Turn off

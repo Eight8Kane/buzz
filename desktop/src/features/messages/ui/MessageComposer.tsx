@@ -810,6 +810,8 @@ function MessageComposerImpl({
       return next;
     });
   }, []);
+  const gate = <T,>(open: boolean, suggestions: T[]) =>
+    richText.isFocused && open ? suggestions : [];
   return (
     <>
       <footer
@@ -870,20 +872,18 @@ function MessageComposerImpl({
             <EmojiAutocomplete
               onSelect={applyEmojiInsert}
               selectedIndex={emojiAutocomplete.emojiSelectedIndex}
-              suggestions={
-                emojiAutocomplete.isEmojiAutocompleteOpen
-                  ? emojiAutocomplete.emojiSuggestions
-                  : []
-              }
+              suggestions={gate(
+                emojiAutocomplete.isEmojiAutocompleteOpen,
+                emojiAutocomplete.emojiSuggestions,
+              )}
             />
             <ChannelAutocomplete
               onSelect={applyChannelInsert}
               selectedIndex={channelLinks.channelSelectedIndex}
-              suggestions={
-                channelLinks.isChannelOpen
-                  ? channelLinks.channelSuggestions
-                  : []
-              }
+              suggestions={gate(
+                channelLinks.isChannelOpen,
+                channelLinks.channelSuggestions,
+              )}
             />
             <MentionAutocomplete
               keepMentionedAgentsPinned={keepMentionedAgentsPinned}
@@ -902,7 +902,7 @@ function MessageComposerImpl({
               onDismiss={mentions.cancelMentionAutocomplete}
               onSelect={selectMentionSuggestion}
               selectedIndex={mentions.mentionSelectedIndex}
-              suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
+              suggestions={gate(mentions.isMentionOpen, mentions.suggestions)}
             />
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
