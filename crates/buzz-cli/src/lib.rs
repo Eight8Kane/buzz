@@ -1834,6 +1834,8 @@ pub enum MediaCmd {
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
+    /// Derive and print the encrypted-memory address for a slug as JSON
+    Address { slug: String },
     /// List non-tombstoned memory entries
     Ls {
         /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
@@ -2176,10 +2178,12 @@ async fn run_broker(cli: Cli) -> Result<(), CliError> {
         Cmd::Messages(sub) => commands::messages::dispatch_broker(sub, &backend).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch_broker(sub, &backend).await,
         Cmd::Users(sub) => commands::users::dispatch_broker(sub, &backend).await,
+        Cmd::Mem(sub) => commands::mem::dispatch_broker(sub, &backend).await,
         _ => Err(CliError::Usage(
             "keyless (broker) mode currently supports the wake→reply slice plus reactions and \
-             profile: 'messages get/send', 'reactions add', and 'users set-profile'. Other \
-             commands need the local backend — unset --agent-mode or set it to 'local'"
+             profile, plus encrypted-memory addressing: 'messages get/send', 'reactions add', \
+             'users set-profile', and 'mem address'. Other commands need the local backend — \
+             unset --agent-mode or set it to 'local'"
                 .into(),
         )),
     }

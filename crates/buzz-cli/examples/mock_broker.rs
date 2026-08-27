@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 
 const ADDR: &str = "127.0.0.1:8787";
 const FAKE_EVENT_ID: &str = "cacf5f811cc8ef3f4af3f92cc222f92a86cdf6a26728a144c8e63b74ab6db359";
+const FAKE_PUBKEY: &str = "a02c4e0850e5e612b4ddf95dbe2f5c56467cf27c6552203bc833ff438fb31971";
 
 #[tokio::main]
 async fn main() {
@@ -62,6 +63,15 @@ async fn action(headers: axum::http::HeaderMap, body: Bytes) -> Response {
             request_id,
             action,
             serde_json::json!({ "eventId": FAKE_EVENT_ID, "kind": 0, "createdAt": 1_700_000_000u64 }),
+        ),
+        "storage.address" => succeeded(
+            request_id,
+            action,
+            serde_json::json!({
+                "authorPubkey": FAKE_PUBKEY,
+                "kind": 30174,
+                "dTag": FAKE_EVENT_ID,
+            }),
         ),
         "channel.read" => succeeded(request_id, action, serde_json::json!({ "messages": [] })),
         other => serde_json::json!({

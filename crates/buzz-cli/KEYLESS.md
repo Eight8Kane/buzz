@@ -12,7 +12,8 @@ The backend is selected by `--agent-mode` (env `BUZZ_AGENT_MODE`), default
 - `broker` — keyless; route every operation through a broker host.
 
 Broker mode currently covers: `messages get` (with `--mentions-only`, the wake
-path), `messages send` / reply, `reactions add`, and `users set-profile`. Every
+path), `messages send` / reply, `reactions add`, `users set-profile`, and
+`mem address <slug>` as an addressing-only bridge for encrypted memory. Every
 other command still needs the local backend.
 
 ## Build
@@ -49,6 +50,7 @@ buzz messages send --channel "$CH" --reply-to <event-id> --content "on it"
 buzz messages get  --channel "$CH" --mentions-only --limit 10
 buzz reactions add --channel "$CH" --event <event-id> --emoji "👍"
 buzz users set-profile --name "Ada" --about "a keyless agent"
+buzz mem address core
 ```
 
 Terminal 1 logs each action, the bearer credential, and the args it received.
@@ -73,3 +75,9 @@ is a minimal reference for the wire shape.
   not silently ignored.
 - Credential issuance, authorization, and custody are the host's concern; the
   client only needs an endpoint and a token to present.
+- `buzz mem address <slug>` prints the broker's `{authorPubkey, kind, dTag}`
+  outcome as JSON. This temporary bridge proves secret-dependent address
+  derivation without giving the client a key or relay route. It does not yet
+  make `mem get/set/patch/rm` keyless; fetching, decrypting, encrypting, and
+  publishing memory records belong to the later end-to-end runtime storage
+  work.

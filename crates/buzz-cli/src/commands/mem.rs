@@ -1,6 +1,7 @@
 //! `buzz mem` — agent-side engram management (NIP-AE).
 //!
 //! Subcommands:
+//! - `buzz mem address <slug>`        — print the encrypted-memory address
 //! - `buzz mem ls`                   — list non-tombstoned memories
 //! - `buzz mem get <slug>`            — print the value to stdout
 //! - `buzz mem hash <slug>`           — print sha256(value) hex
@@ -23,14 +24,19 @@ use buzz_core::engram::{
     self, conversation_key, d_tag, normalize_slug, select_head, validate_and_decrypt, Body, Listing,
 };
 use buzz_core::kind::KIND_AGENT_ENGRAM;
+use buzz_sdk::broker::StorageAddressArgs;
 use nostr::PublicKey;
 
+use crate::backend::{AgentBackend, Backend};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 
 /// Resolve the agent's owner pubkey: explicit `--owner` flag wins, otherwise
 /// fall back to the NIP-OA `auth_tag` (which carries owner pubkey in slot 1).
-fn resolve_owner(client: &BuzzClient, owner_flag: Option<&str>) -> Result<PublicKey, CliError> {
+pub(crate) fn resolve_owner(
+    client: &BuzzClient,
+    owner_flag: Option<&str>,
+) -> Result<PublicKey, CliError> {
     if let Some(s) = owner_flag {
         return PublicKey::from_hex(s)
             .map_err(|e| CliError::Usage(format!("--owner must be a 64-hex pubkey: {e}")));
@@ -83,6 +89,26 @@ fn now_secs() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// `buzz mem address <slug>` — print the NIP-AE event coordinates as JSON.
+pub fn cmd_address(client: &BuzzClient, raw_slug: &str) -> Result<(), CliError> {
+    let slug =
+        normalize_slug(raw_slug).map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
+    let owner = resolve_owner(client, None)?;
+    let conversation_key = conversation_key(client.keys().secret_key(), &owner);
+    let address = buzz_sdk::broker::StorageAddress {
+        author_pubkey: buzz_sdk::broker::PubkeyHex::try_from(client.keys().public_key().to_hex())
+            .map_err(|e| CliError::Other(format!("agent pubkey: {e}")))?,
+        kind: KIND_AGENT_ENGRAM,
+        d_tag: d_tag(&conversation_key, &slug),
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&address)
+            .map_err(|e| CliError::Other(format!("serialize outcome: {e}")))?
+    );
+    Ok(())
 }
 
 /// Submit a signed engram event and confirm the relay treated it as
@@ -737,6 +763,7 @@ pub async fn cmd_rm(
 pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::MemCmd;
     match cmd {
+        MemCmd::Address { slug } => cmd_address(client, &slug),
         MemCmd::Ls { owner, agent, json } => {
             cmd_ls(client, owner.as_deref(), agent.as_deref(), json).await
         }
@@ -774,6 +801,33 @@ pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), Cli
             .await
         }
         MemCmd::Rm { slug, owner } => cmd_rm(client, &slug, owner.as_deref()).await,
+    }
+}
+
+/// Keyless (broker) dispatch for encrypted-memory addressing only.
+///
+/// The returned coordinates are intentionally surfaced as-is. They identify
+/// the encrypted record but do not, by themselves, provide read, decrypt,
+/// encrypt, or publish semantics; those remain a later runtime slice.
+pub async fn dispatch_broker(cmd: crate::MemCmd, backend: &Backend) -> Result<(), CliError> {
+    use crate::MemCmd;
+    match cmd {
+        MemCmd::Address { slug } => {
+            let slug =
+                normalize_slug(&slug).map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
+            let address = backend.storage_address(StorageAddressArgs { slug }).await?;
+            println!(
+                "{}",
+                serde_json::to_string(&address)
+                    .map_err(|e| CliError::Other(format!("serialize outcome: {e}")))?
+            );
+            Ok(())
+        }
+        _ => Err(CliError::Usage(
+            "keyless (broker) mode supports only 'mem address' in this group; encrypted-memory \
+             reads and writes need the later runtime storage slice"
+                .into(),
+        )),
     }
 }
 

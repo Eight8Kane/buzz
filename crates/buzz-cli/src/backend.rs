@@ -14,7 +14,7 @@ use uuid::Uuid;
 use buzz_sdk::broker::{
     ActionArgs, ActionOutcome, BrokerClientExt, BrokerError, BrokerRequest, BrokerResult,
     ChannelReadArgs, EventPublished, MessagePage, MessagePostArgs, MessageReplyArgs,
-    ProfileSetArgs, PubkeyHex, ReactionAddArgs,
+    ProfileSetArgs, PubkeyHex, ReactionAddArgs, StorageAddress, StorageAddressArgs,
 };
 use buzz_sdk::ThreadRef;
 
@@ -24,9 +24,9 @@ use crate::error::CliError;
 
 /// The operations an agent performs, in the broker's vocabulary.
 ///
-/// A closed set — read a channel; post, reply, react; set a profile — mirroring
-/// the contract's actions. Adding one is a change here *and* to the contract,
-/// deliberately.
+/// A closed set — read a channel; post, reply, react; set a profile; derive a
+/// storage address — mirroring the contract's actions. Adding one is a change
+/// here *and* to the contract, deliberately.
 #[allow(async_fn_in_trait)] // dispatched through the `Backend` enum, never `dyn`.
 pub trait AgentBackend {
     async fn channel_read(&self, args: ChannelReadArgs) -> Result<MessagePage, CliError>;
@@ -34,6 +34,7 @@ pub trait AgentBackend {
     async fn message_reply(&self, args: MessageReplyArgs) -> Result<EventPublished, CliError>;
     async fn reaction_add(&self, args: ReactionAddArgs) -> Result<EventPublished, CliError>;
     async fn profile_set(&self, args: ProfileSetArgs) -> Result<EventPublished, CliError>;
+    async fn storage_address(&self, args: StorageAddressArgs) -> Result<StorageAddress, CliError>;
 }
 
 /// Keyless backend: no key, no relay route. Every operation is a broker request.
@@ -98,6 +99,13 @@ impl AgentBackend for BrokerBackend {
         match self.run(ActionArgs::ProfileSet(args)).await? {
             ActionOutcome::ProfileSet(published) => Ok(published),
             _ => Err(unexpected_outcome("profile.set")),
+        }
+    }
+
+    async fn storage_address(&self, args: StorageAddressArgs) -> Result<StorageAddress, CliError> {
+        match self.run(ActionArgs::StorageAddress(args)).await? {
+            ActionOutcome::StorageAddress(address) => Ok(address),
+            _ => Err(unexpected_outcome("storage.address")),
         }
     }
 }
@@ -226,6 +234,18 @@ impl AgentBackend for LocalBackend {
         let event = self.client.sign_event(builder)?;
         self.publish(event).await
     }
+
+    async fn storage_address(&self, args: StorageAddressArgs) -> Result<StorageAddress, CliError> {
+        let owner = crate::commands::mem::resolve_owner(&self.client, None)?;
+        let conversation_key =
+            buzz_core::engram::conversation_key(self.client.keys().secret_key(), &owner);
+        Ok(StorageAddress {
+            author_pubkey: PubkeyHex::try_from(self.client.keys().public_key().to_hex())
+                .map_err(|e| CliError::Other(format!("agent pubkey: {e}")))?,
+            kind: buzz_core::kind::KIND_AGENT_ENGRAM,
+            d_tag: buzz_core::engram::d_tag(&conversation_key, &args.slug),
+        })
+    }
 }
 
 /// A runtime-selected backend. Implements [`AgentBackend`] by dispatch, so
@@ -286,6 +306,13 @@ impl AgentBackend for Backend {
             Self::Broker(b) => b.profile_set(args).await,
         }
     }
+
+    async fn storage_address(&self, args: StorageAddressArgs) -> Result<StorageAddress, CliError> {
+        match self {
+            Self::Local(b) => b.storage_address(args).await,
+            Self::Broker(b) => b.storage_address(args).await,
+        }
+    }
 }
 
 fn broker_verdict(status: &str, error: &BrokerError) -> CliError {
@@ -319,6 +346,7 @@ mod tests {
 
     const CHANNEL: &str = "5df7dfa8-e919-43df-8efd-f1dcb8af7071";
     const EVENT_ID: &str = "cacf5f811cc8ef3f4af3f92cc222f92a86cdf6a26728a144c8e63b74ab6db359";
+    const PUBKEY: &str = "a02c4e0850e5e612b4ddf95dbe2f5c56467cf27c6552203bc833ff438fb31971";
 
     type Responder = Arc<dyn Fn(&str, &str) -> (StatusCode, String) + Send + Sync>;
 
@@ -458,6 +486,33 @@ mod tests {
 
         assert_eq!(published.event_id, EVENT_ID);
         assert_eq!(published.kind, 0);
+    }
+
+    #[tokio::test]
+    async fn broker_storage_address_returns_the_derived_address() {
+        let backend = spawn_host(|rid, action| {
+            succeeded(
+                rid,
+                action,
+                serde_json::json!({
+                    "authorPubkey": PUBKEY,
+                    "kind": 30174,
+                    "dTag": EVENT_ID,
+                }),
+            )
+        })
+        .await;
+
+        let address = backend
+            .storage_address(StorageAddressArgs {
+                slug: "mem/preferences".into(),
+            })
+            .await
+            .expect("address");
+
+        assert_eq!(address.author_pubkey.as_str(), PUBKEY);
+        assert_eq!(address.kind, 30174);
+        assert_eq!(address.d_tag, EVENT_ID);
     }
 
     #[tokio::test]
