@@ -9,24 +9,22 @@ import { listen } from "@tauri-apps/api/event";
 
 import { matchBackForwardChord } from "@/app/navigation/backForwardChords";
 import {
-  type NavigationHistoryEntry,
+  createNavigationHistoryState,
   getBackHistoryEntries,
   getForwardHistoryEntries,
+  recordHistoryVisit,
 } from "@/app/navigation/navigationHistory";
 import {
   traverseHistory,
   traverseHistoryBy,
 } from "@/app/navigation/navigationGuard";
 import { isMacPlatform } from "@/shared/lib/platform";
-import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 
 type RouterHistoryState = {
   __TSR_index?: number;
   __TSR_key?: string;
   key?: string;
 };
-
-const MAX_TRACKED_HISTORY_ENTRIES = 200;
 
 export function useBackForwardControls(currentLabel: string) {
   const router = useRouter();
@@ -37,45 +35,22 @@ export function useBackForwardControls(currentLabel: string) {
   const locationIndex = locationState.__TSR_index ?? 0;
   const locationKey =
     locationState.__TSR_key ?? locationState.key ?? String(locationIndex);
-  const [historyState, setHistoryState] = React.useState(() => ({
-    entriesByIndex: new Map<number, NavigationHistoryEntry>([
-      [
-        locationIndex,
-        { index: locationIndex, key: locationKey, label: currentLabel },
-      ],
-    ]),
-    maxIndex: locationIndex,
-  }));
+  const [historyState, setHistoryState] = React.useState(() =>
+    createNavigationHistoryState({
+      index: locationIndex,
+      key: locationKey,
+      label: currentLabel,
+    }),
+  );
 
   React.useEffect(() => {
-    setHistoryState((current) => {
-      const entriesByIndex = new Map(current.entriesByIndex);
-      const currentEntry = entriesByIndex.get(locationIndex);
-      const replacedForwardEntry =
-        currentEntry !== undefined && currentEntry.key !== locationKey;
-
-      if (replacedForwardEntry) {
-        for (const storedIndex of entriesByIndex.keys()) {
-          if (storedIndex >= locationIndex) {
-            entriesByIndex.delete(storedIndex);
-          }
-        }
-      }
-
-      entriesByIndex.set(locationIndex, {
+    setHistoryState((current) =>
+      recordHistoryVisit(current, {
         index: locationIndex,
         key: locationKey,
         label: currentLabel,
-      });
-      trimMapToSize(entriesByIndex, MAX_TRACKED_HISTORY_ENTRIES);
-
-      return {
-        entriesByIndex,
-        maxIndex: replacedForwardEntry
-          ? locationIndex
-          : Math.max(current.maxIndex, locationIndex),
-      };
-    });
+      }),
+    );
   }, [currentLabel, locationIndex, locationKey]);
 
   const canGoForward = locationIndex < historyState.maxIndex;

@@ -58,50 +58,37 @@ async function openHistoryMenuWithLongPress(
   await expect(menu).toBeVisible();
 }
 
-async function captureHistoryControlAppearance(
+/**
+ * Describes an open history menu by where it sits relative to its button, how
+ * big it is, and what it lists. Comparing this instead of raw pixels keeps the
+ * "both gestures open the same menu" assertion legible: a mismatch names the
+ * field that drifted rather than handing back an opaque Buffer diff.
+ */
+async function readHistoryMenuLayout(
   page: import("@playwright/test").Page,
   button: import("@playwright/test").Locator,
   menu: import("@playwright/test").Locator,
+  itemTestId: string,
 ) {
   await waitForAnimations(page);
-  const [buttonBounds, menuBounds] = await Promise.all([
+  const [buttonBounds, menuBounds, items] = await Promise.all([
     button.boundingBox(),
     menu.boundingBox(),
+    menu.getByTestId(itemTestId).allTextContents(),
   ]);
   if (!buttonBounds || !menuBounds) {
     throw new Error("History control is not visible");
   }
 
-  const padding = 4;
-  const x = Math.max(
-    0,
-    Math.floor(Math.min(buttonBounds.x, menuBounds.x)) - padding,
-  );
-  const y = Math.max(
-    0,
-    Math.floor(Math.min(buttonBounds.y, menuBounds.y)) - padding,
-  );
-  const right = Math.ceil(
-    Math.max(
-      buttonBounds.x + buttonBounds.width,
-      menuBounds.x + menuBounds.width,
-    ),
-  );
-  const bottom = Math.ceil(
-    Math.max(
-      buttonBounds.y + buttonBounds.height,
-      menuBounds.y + menuBounds.height,
-    ),
-  );
-
-  return page.screenshot({
-    clip: {
-      height: bottom - y + padding,
-      width: right - x + padding,
-      x,
-      y,
-    },
-  });
+  return {
+    height: Math.round(menuBounds.height),
+    items,
+    // Radix anchors a context menu at the pointer, and both gestures point at
+    // the button's centre, so the offset must come out identical.
+    offsetX: Math.round(menuBounds.x - buttonBounds.x),
+    offsetY: Math.round(menuBounds.y - buttonBounds.y),
+    width: Math.round(menuBounds.width),
+  };
 }
 
 async function createWorkflow(
@@ -180,10 +167,11 @@ test("back and forward history menus match across right click and long press", a
     "#general",
     "Inbox",
   ]);
-  const rightClickAppearance = await captureHistoryControlAppearance(
+  const rightClickLayout = await readHistoryMenuLayout(
     page,
     backButton,
     historyMenu,
+    "global-back-history-item",
   );
   await page.keyboard.press("Escape");
   await expect(historyMenu).not.toBeVisible();
@@ -195,8 +183,13 @@ test("back and forward history menus match across right click and long press", a
     "Inbox",
   ]);
   expect(
-    await captureHistoryControlAppearance(page, backButton, historyMenu),
-  ).toEqual(rightClickAppearance);
+    await readHistoryMenuLayout(
+      page,
+      backButton,
+      historyMenu,
+      "global-back-history-item",
+    ),
+  ).toEqual(rightClickLayout);
   await historyMenu
     .getByRole("menuitem", { name: "Go back to #general" })
     .click();
@@ -211,10 +204,11 @@ test("back and forward history menus match across right click and long press", a
   await expect(
     forwardHistoryMenu.getByTestId("global-forward-history-item"),
   ).toHaveText(["#random", "#engineering"]);
-  const forwardRightClickAppearance = await captureHistoryControlAppearance(
+  const forwardRightClickLayout = await readHistoryMenuLayout(
     page,
     forwardButton,
     forwardHistoryMenu,
+    "global-forward-history-item",
   );
   await page.keyboard.press("Escape");
   await expect(forwardHistoryMenu).not.toBeVisible();
@@ -224,16 +218,53 @@ test("back and forward history menus match across right click and long press", a
     forwardHistoryMenu.getByTestId("global-forward-history-item"),
   ).toHaveText(["#random", "#engineering"]);
   expect(
-    await captureHistoryControlAppearance(
+    await readHistoryMenuLayout(
       page,
       forwardButton,
       forwardHistoryMenu,
+      "global-forward-history-item",
     ),
-  ).toEqual(forwardRightClickAppearance);
+  ).toEqual(forwardRightClickLayout);
   await forwardHistoryMenu
     .getByRole("menuitem", { name: "Go forward to #engineering" })
     .click();
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+});
+
+test("left clicking a history button only dismisses its open menu", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  const backButton = page.getByTestId("global-back");
+  const historyMenu = page.getByTestId("global-back-history-menu");
+  await backButton.click({ button: "right" });
+  await expect(historyMenu).toBeVisible();
+  await waitForAnimations(page);
+
+  // The open menu is modal, so its dismiss layer — not the button — takes the
+  // click. Drive the mouse directly: Playwright's actionability checks refuse
+  // to click a button that is covered.
+  const bounds = await backButton.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.click(
+    (bounds?.x ?? 0) + (bounds?.width ?? 0) / 2,
+    (bounds?.y ?? 0) + (bounds?.height ?? 0) / 2,
+  );
+
+  // One click closes the menu and does nothing else, like the native control.
+  await expect(historyMenu).not.toBeVisible();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  // The next click is an ordinary back — proof the dismissal neither consumed
+  // it nor left the button inert.
+  await backButton.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
 test("back/forward keyboard chords work while the composer has focus", async ({
