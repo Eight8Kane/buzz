@@ -1,10 +1,12 @@
 import { Loader2 } from "lucide-react";
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { pickBestieAgent } from "@/features/agents/lib/bestie";
 import { useOpenDmMutation } from "@/features/channels/hooks";
+import { useChannelOpenReadState } from "@/features/channels/ui/useChannelOpenReadState";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   useChannelMessagesQuery,
@@ -12,6 +14,7 @@ import {
   useSendMessageMutation,
 } from "@/features/messages/hooks";
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { MessageThreadTranscript } from "@/features/messages/ui/MessageThreadTranscript";
 import { useProfileQuery } from "@/features/profile/hooks";
@@ -22,10 +25,10 @@ import { getPlatformKeysById } from "@/shared/lib/keyboard-shortcuts";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
-export function BestieChatPopover() {
+export function BestieChatPopover({ showTrigger }: { showTrigger: boolean }) {
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
@@ -34,6 +37,10 @@ export function BestieChatPopover() {
   const sendMessageMutation = useSendMessageMutation(null, identityQuery.data);
   const [open, setOpen] = React.useState(false);
   const [channel, setChannel] = React.useState<Channel | null>(null);
+  const [openError, setOpenError] = React.useState<string | null>(null);
+  const [portalTarget, setPortalTarget] = React.useState<HTMLElement | null>(
+    null,
+  );
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const openRequestRef = React.useRef(0);
   const positionedScrollRef = React.useRef(false);
@@ -95,6 +102,30 @@ export function BestieChatPopover() {
     ],
   );
   const lastMessageId = messages.at(-1)?.id ?? null;
+  const latestTopLevelMessage = React.useMemo(() => {
+    const rawMessages = messagesQuery.data;
+    if (!rawMessages) return null;
+    for (let index = rawMessages.length - 1; index >= 0; index -= 1) {
+      if (getThreadReference(rawMessages[index].tags).parentId === null) {
+        return rawMessages[index];
+      }
+    }
+    return null;
+  }, [messagesQuery.data]);
+  const activeReadAt = latestTopLevelMessage
+    ? new Date(latestTopLevelMessage.created_at * 1_000).toISOString()
+    : null;
+  useChannelOpenReadState(
+    open ? (channel?.id ?? null) : null,
+    channel?.isMember,
+    activeReadAt,
+  );
+
+  React.useLayoutEffect(() => {
+    setPortalTarget(
+      showTrigger ? document.getElementById("app-top-chrome-trailing") : null,
+    );
+  }, [showTrigger]);
 
   React.useEffect(() => {
     if (!lastMessageId) return;
@@ -112,9 +143,33 @@ export function BestieChatPopover() {
   React.useEffect(() => {
     if (conversationScopeRef.current === conversationScope) return;
     conversationScopeRef.current = conversationScope;
+    openRequestRef.current += 1;
     setOpen(false);
     setChannel(null);
+    setOpenError(null);
   }, [conversationScope]);
+
+  const openConversation = React.useCallback(() => {
+    if (!bestie) return;
+    const requestId = ++openRequestRef.current;
+    setChannel(null);
+    setOpenError(null);
+    void openDmMutation
+      .mutateAsync({
+        pubkeys: [bestie.pubkey],
+        expectedRelayUrl: activeCommunity?.relayUrl,
+        expectedSignerPubkey: currentPubkey ?? undefined,
+      })
+      .then((openedChannel) => {
+        if (openRequestRef.current === requestId) setChannel(openedChannel);
+      })
+      .catch((error) => {
+        if (openRequestRef.current !== requestId) return;
+        console.error("Failed to open Bestie conversation", error);
+        setOpenError(`Couldn't load your conversation with ${bestie.name}.`);
+        toast.error(`Couldn't open ${bestie.name}`);
+      });
+  }, [activeCommunity?.relayUrl, bestie, currentPubkey, openDmMutation]);
 
   const handleOpenChange = React.useCallback(
     (nextOpen: boolean) => {
@@ -122,28 +177,15 @@ export function BestieChatPopover() {
       setOpen(nextOpen);
       positionedScrollRef.current = false;
       stickToBottomRef.current = true;
-      const requestId = ++openRequestRef.current;
-      if (!nextOpen) {
-        setChannel(null);
+      if (nextOpen) {
+        openConversation();
         return;
       }
-
-      void openDmMutation
-        .mutateAsync({
-          pubkeys: [bestie.pubkey],
-          expectedRelayUrl: activeCommunity?.relayUrl,
-          expectedSignerPubkey: currentPubkey ?? undefined,
-        })
-        .then((openedChannel) => {
-          if (openRequestRef.current === requestId) setChannel(openedChannel);
-        })
-        .catch((error) => {
-          if (openRequestRef.current !== requestId) return;
-          console.error("Failed to open Bestie conversation", error);
-          toast.error(`Couldn't open ${bestie.name}`);
-        });
+      openRequestRef.current += 1;
+      setChannel(null);
+      setOpenError(null);
     },
-    [activeCommunity?.relayUrl, bestie, currentPubkey, openDmMutation],
+    [bestie, openConversation],
   );
 
   const handleBestieShortcut = React.useEffectEvent((event: KeyboardEvent) => {
@@ -184,36 +226,50 @@ export function BestieChatPopover() {
     });
   };
   const isLoading =
-    openDmMutation.isPending || (channel && messagesQuery.isLoading);
+    !openError &&
+    (openDmMutation.isPending || (channel && messagesQuery.isLoading));
   const isSending = sendMessageMutation.isPending;
 
   return (
     <Popover onOpenChange={handleOpenChange} open={open}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <Button
-              aria-label={`Open ${bestie.name} chat`}
-              className="h-[28px] w-[28px] rounded-[6px] p-0"
-              data-testid="open-bestie-panel"
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <ProfileAvatar
-                avatarUrl={bestie.avatarUrl}
-                className="size-6 text-3xs"
-                label={bestie.name}
-                plain
-                testId="bestie-header-avatar"
-              />
-            </Button>
-          </PopoverTrigger>
-        </TooltipTrigger>
-        <TooltipContent>
-          Message {bestie.name} ({getPlatformKeysById("open-bestie")})
-        </TooltipContent>
-      </Tooltip>
+      {portalTarget ? (
+        createPortal(
+          <PopoverAnchor asChild>
+            <div className="flex items-center">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    aria-expanded={open}
+                    aria-label={`Open ${bestie.name} chat`}
+                    className="h-[28px] w-[28px] rounded-[6px] p-0"
+                    data-testid="open-bestie-panel"
+                    onClick={() => handleOpenChange(!open)}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <ProfileAvatar
+                      avatarUrl={bestie.avatarUrl}
+                      className="size-6 text-3xs"
+                      label={bestie.name}
+                      plain
+                      testId="bestie-header-avatar"
+                    />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Message {bestie.name} ({getPlatformKeysById("open-bestie")})
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          </PopoverAnchor>,
+          portalTarget,
+        )
+      ) : (
+        <PopoverAnchor asChild>
+          <span className="pointer-events-none fixed right-3 top-10 size-px" />
+        </PopoverAnchor>
+      )}
 
       <PopoverContent
         align="end"
@@ -247,7 +303,17 @@ export function BestieChatPopover() {
             }}
             ref={scrollRef}
           >
-            {isLoading ? (
+            {openError ? (
+              <div
+                className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center"
+                role="alert"
+              >
+                <p className="text-xs text-muted-foreground">{openError}</p>
+                <Button onClick={openConversation} size="sm" type="button">
+                  Retry
+                </Button>
+              </div>
+            ) : isLoading ? (
               <div className="flex h-full items-center justify-center text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" />
               </div>

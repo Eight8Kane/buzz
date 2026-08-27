@@ -162,14 +162,13 @@ export function AppTopChrome({
         data-tauri-drag-region
         id="app-top-chrome-content"
       />
-      {trailingContent ? (
-        <div
-          className={cn("flex shrink-0 items-center", navRowAlignmentClass)}
-          data-testid="app-top-chrome-trailing"
-        >
-          {trailingContent}
-        </div>
-      ) : null}
+      <div
+        className={cn("flex shrink-0 items-center", navRowAlignmentClass)}
+        data-testid="app-top-chrome-trailing"
+        id="app-top-chrome-trailing"
+      >
+        {trailingContent}
+      </div>
     </div>
   );
 }
