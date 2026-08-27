@@ -7,6 +7,7 @@ import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
 import { FeatureGate } from "@/shared/features";
+import type { OpenDmInput } from "@/shared/api/tauriChannels";
 import type { Channel, SearchHit } from "@/shared/api/types";
 import {
   SidebarHeader,
@@ -33,7 +34,7 @@ type AppSidebarPinnedHeaderProps = {
   onBrowseChannels?: () => void;
   onCreateAgent: () => void;
   onCreateChannel: () => void;
-  onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
+  onOpenDm: (input: OpenDmInput) => Promise<void>;
   onOpenSearchResult: (hit: SearchHit, query: string) => void;
   onSelectChannel: (channelId: string) => void;
   searchChannels: Channel[];
@@ -44,8 +45,9 @@ type AppSidebarPinnedHeaderProps = {
 
 type AppSidebarPrimaryMenuProps = {
   bestieRelayUrl?: string | null;
+  currentPubkey?: string;
   homeBadgeCount: number;
-  onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
+  onOpenDm: (input: OpenDmInput) => Promise<void>;
   onSelectAgents: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
@@ -96,6 +98,7 @@ export function AppSidebarPinnedHeader({
 
 export function AppSidebarPrimaryMenu({
   bestieRelayUrl,
+  currentPubkey,
   homeBadgeCount,
   onOpenDm,
   onSelectAgents,
@@ -177,6 +180,7 @@ export function AppSidebarPrimaryMenu({
           </SidebarMenuItem>
           <FeatureGate feature="bestie">
             <BestieSidebarMenuItem
+              currentPubkey={currentPubkey}
               onOpenDm={onOpenDm}
               relayUrl={bestieRelayUrl}
             />
@@ -203,10 +207,12 @@ export function AppSidebarPrimaryMenu({
 }
 
 function BestieSidebarMenuItem({
+  currentPubkey,
   onOpenDm,
   relayUrl,
 }: {
-  onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
+  currentPubkey?: string;
+  onOpenDm: (input: OpenDmInput) => Promise<void>;
   relayUrl?: string | null;
 }) {
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -221,7 +227,16 @@ function BestieSidebarMenuItem({
     <SidebarMenuItem>
       <SidebarMenuButton
         data-testid="open-bestie-dm"
-        onClick={() => void onOpenDm({ pubkeys: [bestieAgent.pubkey] })}
+        onClick={() => {
+          const expectedRelayUrl = relayUrl?.trim();
+          const expectedSignerPubkey = currentPubkey?.trim();
+          if (!expectedRelayUrl || !expectedSignerPubkey) return;
+          void onOpenDm({
+            expectedRelayUrl,
+            expectedSignerPubkey,
+            pubkeys: [bestieAgent.pubkey],
+          });
+        }}
         tooltip={`Message ${bestieAgent.name}`}
         type="button"
       >

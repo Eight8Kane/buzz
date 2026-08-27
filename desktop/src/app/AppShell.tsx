@@ -22,6 +22,7 @@ import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellKeyboardShortcuts } from "@/app/useAppShellKeyboardShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
+import { useScopedOpenDmNavigation } from "@/app/useScopedOpenDmNavigation";
 import { useChannelActivityProjection } from "@/app/useChannelActivityProjection";
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
@@ -32,7 +33,6 @@ import {
   useChannelsQuery,
   useCreateChannelMutation,
   useHideDmMutation,
-  useOpenDmMutation,
 } from "@/features/channels/hooks";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
@@ -503,7 +503,11 @@ export function AppShell() {
   const createChannelMutation = useCreateChannelMutation(),
     createForumMutation = useCreateChannelMutation();
   const { applyCanvas, applyAgents } = useApplyTemplate();
-  const openDmMutation = useOpenDmMutation();
+  const openDm = useScopedOpenDmNavigation({
+    goChannel,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
+    signerPubkey: identityQuery.data?.pubkey,
+  });
   const hideDmMutation = useHideDmMutation();
   const {
     browseDialogType,
@@ -864,13 +868,7 @@ export function AppShell() {
                           onMarkChannelRead={markChannelRead}
                           onMarkChannelUnread={markChannelUnread}
                           onBrowseChannels={handleOpenBrowseChannels}
-                          onOpenDm={async ({ pubkeys }) => {
-                            const directMessage =
-                              await openDmMutation.mutateAsync({
-                                pubkeys,
-                              });
-                            await goChannel(directMessage.id);
-                          }}
+                          onOpenDm={openDm}
                           onSelectAgents={() => void goAgents()}
                           onSelectChannel={handleSidebarChannelSelect}
                           onOpenSearchResult={handleOpenSearchResult}

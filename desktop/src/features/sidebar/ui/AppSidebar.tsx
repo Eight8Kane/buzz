@@ -553,6 +553,7 @@ export function AppSidebar({
             >
               <AppSidebarPrimaryMenu
                 bestieRelayUrl={activeCommunity?.relayUrl}
+                currentPubkey={currentPubkey}
                 homeBadgeCount={homeBadgeCount}
                 onOpenDm={onOpenDm}
                 onSelectAgents={onSelectAgents}
