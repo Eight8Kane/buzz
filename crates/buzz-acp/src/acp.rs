@@ -520,7 +520,9 @@ impl AcpClient {
                     | "BUZZ_PRIVATE_KEY"
                     | "BUZZ_AUTH_TAG"
             );
-            if force_runtime_provisioning || std::env::var_os(key).is_none() {
+            if force_runtime_provisioning && value.is_empty() {
+                cmd.env_remove(key);
+            } else if force_runtime_provisioning || std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
         }
@@ -3105,6 +3107,67 @@ mod tests {
         client.shutdown().await;
         std::fs::remove_dir_all(&dir).expect("remove env probe dir");
         observed
+    }
+
+    /// Spawn a probe that distinguishes an absent variable from a present but
+    /// empty one. This pins broker tombstones to `env_remove`, not `KEY=`.
+    #[cfg(unix)]
+    async fn spawn_named_and_probe_child_env_presence(
+        file_name: &str,
+        var: &str,
+        extra_env: &[(String, String)],
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-env-presence-probe-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create env presence probe dir");
+        let path = dir.join(file_name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nif [ \"${{{var}+x}}\" = x ]; then printf 'set\\n'; else printf 'unset\\n'; fi\n"
+            ),
+        )
+        .expect("write env presence probe script");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("stat presence probe")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).expect("chmod presence probe");
+
+        let mut client = AcpClient::spawn(
+            path.to_str().expect("probe path is UTF-8"),
+            &[],
+            extra_env,
+            false,
+        )
+        .await
+        .expect("spawn env presence probe script");
+        let observed = client
+            .reader
+            .next()
+            .await
+            .expect("child produced no presence output")
+            .expect("child presence output was not readable");
+        client.shutdown().await;
+        std::fs::remove_dir_all(&dir).expect("remove env presence probe dir");
+        observed
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_broker_tombstone_removes_inherited_key_from_child() {
+        let observed = spawn_named_and_probe_child_env_presence(
+            "goose",
+            "BUZZ_PRIVATE_KEY",
+            &[("BUZZ_PRIVATE_KEY".into(), String::new())],
+        )
+        .await;
+
+        assert_eq!(observed, "unset");
     }
 
     /// Buzz-owned Hermes processes get the configured-MCP isolation default,

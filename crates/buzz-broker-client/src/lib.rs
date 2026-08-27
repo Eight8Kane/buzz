@@ -10,6 +10,8 @@ use buzz_sdk::broker::{
     BROKER_ACTION_PATH, BROKER_CREDENTIAL_HEADER,
 };
 
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A broker host endpoint plus the agent's bearer credential.
 ///
 /// Holds no key and knows nothing of the relay: its whole authority is the
@@ -18,6 +20,7 @@ pub struct HttpBrokerClient {
     base_url: String,
     credential: String,
     http: reqwest::Client,
+    request_timeout: std::time::Duration,
 }
 
 impl HttpBrokerClient {
@@ -32,10 +35,20 @@ impl HttpBrokerClient {
         credential: impl Into<String>,
         http: reqwest::Client,
     ) -> Self {
+        Self::with_client_timeout(base_url, credential, http, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    fn with_client_timeout(
+        base_url: impl Into<String>,
+        credential: impl Into<String>,
+        http: reqwest::Client,
+        request_timeout: std::time::Duration,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
             credential: credential.into(),
             http,
+            request_timeout,
         }
     }
 }
@@ -47,24 +60,34 @@ impl BrokerClient for HttpBrokerClient {
                 "{}{BROKER_ACTION_PATH}",
                 self.base_url.trim_end_matches('/')
             );
-            let response = self
-                .http
-                .post(url)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .header(
-                    BROKER_CREDENTIAL_HEADER,
-                    format!("Bearer {}", self.credential),
-                )
-                .body(request.body().to_vec())
-                .send()
-                .await
-                .map_err(|e| BrokerTransportError::Unreachable(e.to_string()))?;
+            let (status, body) = tokio::time::timeout(self.request_timeout, async {
+                let response = self
+                    .http
+                    .post(url)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        BROKER_CREDENTIAL_HEADER,
+                        format!("Bearer {}", self.credential),
+                    )
+                    .body(request.body().to_vec())
+                    .send()
+                    .await
+                    .map_err(|e| BrokerTransportError::Unreachable(e.to_string()))?;
 
-            let status = response.status().as_u16();
-            let body = response
-                .bytes()
-                .await
-                .map_err(|e| BrokerTransportError::Unreachable(e.to_string()))?;
+                let status = response.status().as_u16();
+                let body = response
+                    .bytes()
+                    .await
+                    .map_err(|e| BrokerTransportError::Unreachable(e.to_string()))?;
+                Ok::<_, BrokerTransportError>((status, body))
+            })
+            .await
+            .map_err(|_| {
+                BrokerTransportError::Unreachable(format!(
+                    "broker request timed out after {} seconds",
+                    self.request_timeout.as_secs_f64()
+                ))
+            })??;
 
             // Parse an envelope whatever the status. Only its absence makes the
             // status meaningful, and then only as operator detail.
@@ -198,5 +221,28 @@ mod tests {
         let err = client.execute(&req).await.expect_err("unreachable");
 
         assert!(matches!(err, BrokerTransportError::Unreachable(_)));
+    }
+
+    #[tokio::test]
+    async fn hung_host_is_bounded_by_the_transport_timeout() {
+        let app = Router::new().route(
+            BROKER_ACTION_PATH,
+            post(|| async { std::future::pending::<Response>().await }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = HttpBrokerClient::with_client_timeout(
+            format!("http://{addr}"),
+            CRED,
+            reqwest::Client::new(),
+            std::time::Duration::from_millis(20),
+        );
+        let err = client.execute(&post_request()).await.expect_err("timeout");
+
+        assert!(
+            matches!(err, BrokerTransportError::Unreachable(message) if message.contains("timed out"))
+        );
     }
 }

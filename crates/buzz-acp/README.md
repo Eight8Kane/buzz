@@ -96,6 +96,12 @@ nudges, and core-memory injection are disabled. The `buzz` CLI operations
 available to the spawned agent are documented in
 [`../buzz-cli/KEYLESS.md`](../buzz-cli/KEYLESS.md).
 
+Broker actions time out after 30 seconds, and an `unauthenticated` polling
+verdict terminates the harness so a revoked credential cannot leave a
+warn-spamming process that appears healthy. Poll cursors and event deduplication
+remain in memory only; restart-window semantics are a required real-host
+integration check.
+
 ## Running with Codex
 
 [codex-acp](https://github.com/agentclientprotocol/codex-acp) wraps OpenAI Codex in an ACP interface.

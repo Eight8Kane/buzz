@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use buzz_broker_client::HttpBrokerClient;
 use buzz_sdk::broker::{
-    ActionArgs, ActionOutcome, BrokerClientExt, BrokerRequest, BrokerResult, ChannelReadArgs,
-    StorageAddressArgs,
+    ActionArgs, ActionOutcome, BrokerClientExt, BrokerErrorCode, BrokerRequest, BrokerResult,
+    ChannelReadArgs, StorageAddressArgs,
 };
 use nostr::{Event, Keys};
 use tokio::time::MissedTickBehavior;
@@ -36,6 +36,24 @@ pub struct BrokerRuntime {
     seen_previous: HashSet<String>,
     poll: tokio::time::Interval,
     placeholder_keys: Keys,
+    terminal_error: Option<String>,
+}
+
+struct BrokerActionError {
+    detail: String,
+    code: Option<BrokerErrorCode>,
+}
+
+impl std::fmt::Display for BrokerActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl BrokerActionError {
+    fn relay_error(self) -> RelayError {
+        RelayError::Http(self.detail)
+    }
 }
 
 impl BrokerRuntime {
@@ -53,7 +71,8 @@ impl BrokerRuntime {
                 slug: "core".into(),
             }),
         )
-        .await?;
+        .await
+        .map_err(BrokerActionError::relay_error)?;
         let ActionOutcome::StorageAddress(address) = outcome else {
             return Err(RelayError::Http(
                 "broker returned the wrong outcome for storage.address".into(),
@@ -73,6 +92,7 @@ impl BrokerRuntime {
                 seen_previous: HashSet::new(),
                 poll,
                 placeholder_keys,
+                terminal_error: None,
             },
             agent_pubkey,
         ))
@@ -122,6 +142,11 @@ impl BrokerRuntime {
                         tracing::warn!(%channel_id, "broker returned the wrong channel.read outcome");
                         continue;
                     }
+                    Err(error) if error.code == Some(BrokerErrorCode::Unauthenticated) => {
+                        tracing::error!(%channel_id, "broker credential was rejected: {error}");
+                        self.terminal_error = Some(error.to_string());
+                        return None;
+                    }
                     Err(error) => {
                         tracing::warn!(%channel_id, "broker channel.read failed: {error}");
                         continue;
@@ -155,22 +180,34 @@ impl BrokerRuntime {
     }
 }
 
-async fn execute(client: &HttpBrokerClient, args: ActionArgs) -> Result<ActionOutcome, RelayError> {
+async fn execute(
+    client: &HttpBrokerClient,
+    args: ActionArgs,
+) -> Result<ActionOutcome, BrokerActionError> {
     let request = BrokerRequest::new(Uuid::new_v4().to_string(), args)
         .and_then(BrokerRequest::prepare)
-        .map_err(|error| RelayError::Http(format!("broker request: {error}")))?;
+        .map_err(|error| BrokerActionError {
+            detail: format!("broker request: {error}"),
+            code: None,
+        })?;
     let response = client
         .execute(&request)
         .await
-        .map_err(|error| RelayError::Http(format!("broker transport: {error}")))?;
+        .map_err(|error| BrokerActionError {
+            detail: format!("broker transport: {error}"),
+            code: None,
+        })?;
     match response.into_envelope().result {
         BrokerResult::Succeeded { outcome } => Ok(outcome),
         BrokerResult::Failed { error } | BrokerResult::Indeterminate { error } => {
-            Err(RelayError::Http(format!(
-                "broker verdict: {} [{}]",
-                error.message,
-                error.code.as_str()
-            )))
+            Err(BrokerActionError {
+                detail: format!(
+                    "broker verdict: {} [{}]",
+                    error.message,
+                    error.code.as_str()
+                ),
+                code: Some(error.code),
+            })
         }
     }
 }
@@ -302,7 +339,10 @@ impl RuntimeTransport {
     pub async fn reconnect(&mut self) -> Result<(), RelayError> {
         match self {
             Self::Local(relay) => relay.reconnect().await,
-            Self::Broker(_) => Ok(()),
+            Self::Broker(runtime) => match &runtime.terminal_error {
+                Some(error) => Err(RelayError::Http(error.clone())),
+                None => Ok(()),
+            },
         }
     }
 

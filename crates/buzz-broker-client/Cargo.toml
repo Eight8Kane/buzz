@@ -11,7 +11,7 @@ description = "Shared HTTP transport for the Buzz agent broker"
 buzz-sdk = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
-tokio = { workspace = true }

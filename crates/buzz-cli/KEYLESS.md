@@ -82,6 +82,17 @@ is a minimal reference for the wire shape.
   not silently ignored.
 - Credential issuance, authorization, and custody are the host's concern; the
   client only needs an endpoint and a token to present.
+- Broker HTTP actions have a 30-second end-to-end transport timeout. A runtime
+  credential rejected as `unauthenticated` is terminal instead of being polled
+  forever.
+- Runtime cursors and event deduplication are currently in memory only. The
+  first cursorless read after restart follows the host's default-window
+  semantics, which must be pinned at the real-host integration checkpoint to
+  prevent missed or replayed mentions.
+- This CLI slice exposes only the first `messages get --limit` window; broker
+  cursor pagination and thread reads are not yet command-line options. The ACP
+  runtime therefore prompts from the triggering event without relay-fetched
+  thread history.
 - `buzz mem address <slug>` prints the broker's `{authorPubkey, kind, dTag}`
   outcome as JSON. This temporary bridge proves secret-dependent address
   derivation without giving the client a key or relay route. It does not yet

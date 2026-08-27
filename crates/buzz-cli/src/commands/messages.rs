@@ -985,7 +985,7 @@ pub async fn dispatch_broker(cmd: crate::MessagesCmd, backend: &Backend) -> Resu
             if before.is_some() || since.is_some() || kinds.is_some() {
                 return Err(CliError::Usage(
                     "--before/--since/--kinds are not supported in keyless mode; the host owns \
-                     windowing (use --limit and the returned cursor)"
+                     windowing (only the first --limit window is exposed by this CLI slice)"
                         .into(),
                 ));
             }

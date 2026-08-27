@@ -2152,7 +2152,7 @@ async fn run_broker(cli: Cli) -> Result<(), CliError> {
     // Fail closed on the keyless invariant: a key present on the box contradicts
     // broker mode, and silently ignoring it would let a misprovisioned "keyless"
     // agent run with an nsec sitting right there.
-    if cli.private_key.is_some() {
+    if broker_private_key_present(cli.private_key.as_deref()) {
         return Err(CliError::Usage(
             "broker mode is keyless — don't supply a private key. Unset --private-key / \
              BUZZ_PRIVATE_KEY to run keyless, or use --agent-mode=local to sign with it."
@@ -2188,10 +2188,28 @@ async fn run_broker(cli: Cli) -> Result<(), CliError> {
     }
 }
 
+/// Whether broker provisioning contains actual key material.
+///
+/// Clap represents a present-but-empty environment variable as `Some("")`.
+/// Treat that exact tombstone as absent so a parent process can scrub an
+/// inherited key without breaking broker mode; every non-empty value still
+/// fails closed.
+fn broker_private_key_present(private_key: Option<&str>) -> bool {
+    private_key.is_some_and(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn broker_key_guard_treats_only_an_empty_tombstone_as_absent() {
+        assert!(!broker_private_key_present(None));
+        assert!(!broker_private_key_present(Some("")));
+        assert!(broker_private_key_present(Some(" ")));
+        assert!(broker_private_key_present(Some("nsec1secret")));
+    }
 
     /// Raw shorthand `[auth,hex,,hex]` normalizes to strict JSON; the empty
     /// conditions field becomes `""`.
