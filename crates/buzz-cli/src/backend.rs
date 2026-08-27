@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use buzz_sdk::broker::{
     ActionArgs, ActionOutcome, BrokerClientExt, BrokerError, BrokerRequest, BrokerResult,
-    ChannelReadArgs, EventPublished, MessagePage, MessagePostArgs, MessageReplyArgs, PubkeyHex,
+    ChannelReadArgs, EventPublished, MessagePage, MessagePostArgs, MessageReplyArgs,
+    ProfileSetArgs, PubkeyHex, ReactionAddArgs,
 };
 use buzz_sdk::ThreadRef;
 
@@ -23,13 +24,16 @@ use crate::error::CliError;
 
 /// The operations an agent performs, in the broker's vocabulary.
 ///
-/// A closed set today — read a channel, post, reply — mirroring the contract's
-/// first slice. Adding one is a change here *and* to the contract, deliberately.
+/// A closed set — read a channel; post, reply, react; set a profile — mirroring
+/// the contract's actions. Adding one is a change here *and* to the contract,
+/// deliberately.
 #[allow(async_fn_in_trait)] // dispatched through the `Backend` enum, never `dyn`.
 pub trait AgentBackend {
     async fn channel_read(&self, args: ChannelReadArgs) -> Result<MessagePage, CliError>;
     async fn message_post(&self, args: MessagePostArgs) -> Result<EventPublished, CliError>;
     async fn message_reply(&self, args: MessageReplyArgs) -> Result<EventPublished, CliError>;
+    async fn reaction_add(&self, args: ReactionAddArgs) -> Result<EventPublished, CliError>;
+    async fn profile_set(&self, args: ProfileSetArgs) -> Result<EventPublished, CliError>;
 }
 
 /// Keyless backend: no key, no relay route. Every operation is a broker request.
@@ -80,6 +84,20 @@ impl AgentBackend for BrokerBackend {
         match self.run(ActionArgs::MessageReply(args)).await? {
             ActionOutcome::MessageReply(published) => Ok(published),
             _ => Err(unexpected_outcome("message.reply")),
+        }
+    }
+
+    async fn reaction_add(&self, args: ReactionAddArgs) -> Result<EventPublished, CliError> {
+        match self.run(ActionArgs::ReactionAdd(args)).await? {
+            ActionOutcome::ReactionAdd(published) => Ok(published),
+            _ => Err(unexpected_outcome("reaction.add")),
+        }
+    }
+
+    async fn profile_set(&self, args: ProfileSetArgs) -> Result<EventPublished, CliError> {
+        match self.run(ActionArgs::ProfileSet(args)).await? {
+            ActionOutcome::ProfileSet(published) => Ok(published),
+            _ => Err(unexpected_outcome("profile.set")),
         }
     }
 }
@@ -174,6 +192,40 @@ impl AgentBackend for LocalBackend {
         let event = self.client.sign_event(builder)?;
         self.publish(event).await
     }
+
+    async fn reaction_add(&self, args: ReactionAddArgs) -> Result<EventPublished, CliError> {
+        // A kind:7 reaction references only its target event; the channel the
+        // broker carries is a host-side scoping concept, unused on this path.
+        let target = nostr::EventId::from_hex(&args.target_event_id)
+            .map_err(|e| CliError::Other(format!("reaction target: {e}")))?;
+        let builder = buzz_sdk::build_reaction(target, &args.reaction)
+            .map_err(|e| CliError::Other(format!("build_reaction: {e}")))?;
+        let event = self.client.sign_event(builder)?;
+        self.publish(event).await
+    }
+
+    async fn profile_set(&self, args: ProfileSetArgs) -> Result<EventPublished, CliError> {
+        // Contract semantics: absent fields are left as they are. With no host to
+        // merge, emulate it by read-merge-writing over the current kind:0.
+        let current = crate::commands::users::fetch_current_profile(&self.client).await?;
+        let get = |key: &str| current.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+        let display_name = args
+            .display_name
+            .or_else(|| get("display_name").or_else(|| get("name")));
+        let about = args.about.or_else(|| get("about"));
+        let picture = args.picture.or_else(|| get("picture"));
+        let nip05 = get("nip05");
+        let builder = buzz_sdk::build_profile(
+            display_name.as_deref(),
+            None,
+            picture.as_deref(),
+            about.as_deref(),
+            nip05.as_deref(),
+        )
+        .map_err(|e| CliError::Other(format!("build_profile: {e}")))?;
+        let event = self.client.sign_event(builder)?;
+        self.publish(event).await
+    }
 }
 
 /// A runtime-selected backend. Implements [`AgentBackend`] by dispatch, so
@@ -218,6 +270,20 @@ impl AgentBackend for Backend {
         match self {
             Self::Local(b) => b.message_reply(args).await,
             Self::Broker(b) => b.message_reply(args).await,
+        }
+    }
+
+    async fn reaction_add(&self, args: ReactionAddArgs) -> Result<EventPublished, CliError> {
+        match self {
+            Self::Local(b) => b.reaction_add(args).await,
+            Self::Broker(b) => b.reaction_add(args).await,
+        }
+    }
+
+    async fn profile_set(&self, args: ProfileSetArgs) -> Result<EventPublished, CliError> {
+        match self {
+            Self::Local(b) => b.profile_set(args).await,
+            Self::Broker(b) => b.profile_set(args).await,
         }
     }
 }
@@ -344,6 +410,54 @@ mod tests {
             .expect("published");
 
         assert_eq!(published.event_id, EVENT_ID);
+    }
+
+    #[tokio::test]
+    async fn broker_reaction_returns_the_published_event() {
+        let backend = spawn_host(|rid, action| {
+            succeeded(
+                rid,
+                action,
+                serde_json::json!({ "eventId": EVENT_ID, "kind": 7, "createdAt": 1_700_000_000u64 }),
+            )
+        })
+        .await;
+
+        let published = backend
+            .reaction_add(ReactionAddArgs {
+                channel_id: CHANNEL.into(),
+                target_event_id: EVENT_ID.into(),
+                reaction: "👍".into(),
+            })
+            .await
+            .expect("published");
+
+        assert_eq!(published.event_id, EVENT_ID);
+        assert_eq!(published.kind, 7);
+    }
+
+    #[tokio::test]
+    async fn broker_profile_set_returns_the_published_event() {
+        let backend = spawn_host(|rid, action| {
+            succeeded(
+                rid,
+                action,
+                serde_json::json!({ "eventId": EVENT_ID, "kind": 0, "createdAt": 1_700_000_000u64 }),
+            )
+        })
+        .await;
+
+        let published = backend
+            .profile_set(ProfileSetArgs {
+                display_name: Some("Ada".into()),
+                about: None,
+                picture: None,
+            })
+            .await
+            .expect("published");
+
+        assert_eq!(published.event_id, EVENT_ID);
+        assert_eq!(published.kind, 0);
     }
 
     #[tokio::test]

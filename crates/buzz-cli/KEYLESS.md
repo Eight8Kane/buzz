@@ -11,8 +11,9 @@ The backend is selected by `--agent-mode` (env `BUZZ_AGENT_MODE`), default
 - `local` — hold the key, sign locally, talk to the relay (the unchanged default).
 - `broker` — keyless; route every operation through a broker host.
 
-This first slice covers the wake→reply loop: `messages get` (with
-`--mentions-only`, the wake path) and `messages send` / reply.
+Broker mode currently covers: `messages get` (with `--mentions-only`, the wake
+path), `messages send` / reply, `reactions add`, and `users set-profile`. Every
+other command still needs the local backend.
 
 ## Build
 
@@ -46,6 +47,8 @@ CH=<channel-uuid>
 buzz messages send --channel "$CH" --content "hello from a keyless client"
 buzz messages send --channel "$CH" --reply-to <event-id> --content "on it"
 buzz messages get  --channel "$CH" --mentions-only --limit 10
+buzz reactions add --channel "$CH" --event <event-id> --emoji "👍"
+buzz users set-profile --name "Ada" --about "a keyless agent"
 ```
 
 Terminal 1 logs each action, the bearer credential, and the args it received.

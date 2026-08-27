@@ -778,6 +778,9 @@ pub enum ReactionsCmd {
         /// Image URL for a custom emoji reaction; when set, content becomes `:shortcode:`
         #[arg(long = "emoji-url")]
         emoji_url: Option<String>,
+        /// Channel UUID — required in keyless mode (the host scopes the reaction to it)
+        #[arg(long)]
+        channel: Option<String>,
     },
     /// Remove an emoji reaction from a message
     Remove {
@@ -2171,10 +2174,12 @@ async fn run_broker(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Cmd::Messages(sub) => commands::messages::dispatch_broker(sub, &backend).await,
+        Cmd::Reactions(sub) => commands::reactions::dispatch_broker(sub, &backend).await,
+        Cmd::Users(sub) => commands::users::dispatch_broker(sub, &backend).await,
         _ => Err(CliError::Usage(
-            "keyless (broker) mode currently supports only 'messages get' and 'messages send' \
-             (the wake→reply slice); other commands need the local backend — unset --agent-mode \
-             or set it to 'local'"
+            "keyless (broker) mode currently supports the wake→reply slice plus reactions and \
+             profile: 'messages get/send', 'reactions add', and 'users set-profile'. Other \
+             commands need the local backend — unset --agent-mode or set it to 'local'"
                 .into(),
         )),
     }

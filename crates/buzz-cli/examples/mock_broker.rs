@@ -53,6 +53,16 @@ async fn action(headers: axum::http::HeaderMap, body: Bytes) -> Response {
             action,
             serde_json::json!({ "eventId": FAKE_EVENT_ID, "kind": 9, "createdAt": 1_700_000_000u64 }),
         ),
+        "reaction.add" => succeeded(
+            request_id,
+            action,
+            serde_json::json!({ "eventId": FAKE_EVENT_ID, "kind": 7, "createdAt": 1_700_000_000u64 }),
+        ),
+        "profile.set" => succeeded(
+            request_id,
+            action,
+            serde_json::json!({ "eventId": FAKE_EVENT_ID, "kind": 0, "createdAt": 1_700_000_000u64 }),
+        ),
         "channel.read" => succeeded(request_id, action, serde_json::json!({ "messages": [] })),
         other => serde_json::json!({
             "type": "broker_result",
