@@ -11,6 +11,7 @@ mod prompt_framing;
 mod prompt_project;
 mod queue;
 mod relay;
+mod runtime_transport;
 mod setup_mode;
 mod usage;
 
@@ -32,7 +33,7 @@ use buzz_core::observer::{
 };
 use clap::Parser;
 use config::{
-    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
+    AgentMode, AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
     MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
@@ -45,6 +46,7 @@ use pool::{
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
+use runtime_transport::RuntimeTransport;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -1954,6 +1956,10 @@ async fn tokio_main() -> Result<()> {
     if let Some(payload) = setup_mode::SetupPayload::from_env()
         .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?
     {
+        ensure!(
+            config.agent_mode == AgentMode::Local,
+            "setup-listener mode is not available in keyless broker mode"
+        );
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
         return setup_mode::run_setup_listener(config, payload).await;
     }
@@ -1996,18 +2002,50 @@ async fn tokio_main() -> Result<()> {
         .unwrap_or_default()
         .as_secs();
 
-    let pubkey_hex = config.keys.public_key().to_hex();
+    let local_pubkey_hex = config.keys.public_key().to_hex();
 
     // Parse BUZZ_AUTH_TAG into a nostr::Tag for NIP-OA relay membership delegation.
-    let relay_auth_tag: Option<nostr::Tag> = std::env::var("BUZZ_AUTH_TAG")
-        .ok()
+    let relay_auth_tag: Option<nostr::Tag> = (config.agent_mode == AgentMode::Local)
+        .then(|| std::env::var("BUZZ_AUTH_TAG").ok())
+        .flatten()
         .filter(|s| !s.is_empty())
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
-    let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
+    let (mut relay, pubkey_hex) = match config.agent_mode {
+        AgentMode::Local => {
+            let relay = HarnessRelay::connect(
+                &config.relay_url,
+                &config.keys,
+                &local_pubkey_hex,
+                relay_auth_tag,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+            (RuntimeTransport::local(relay), local_pubkey_hex)
+        }
+        AgentMode::Broker => {
+            let broker = config
+                .broker
+                .as_ref()
+                .expect("broker config validated for broker mode");
+            let channel_ids = config
+                .channels_override
+                .as_ref()
+                .expect("channels validated for broker mode")
+                .iter()
+                .map(|channel| Uuid::parse_str(channel).expect("channel validated"))
+                .collect();
+            RuntimeTransport::broker(
+                broker.base_url.clone(),
+                broker.credential.clone(),
+                channel_ids,
+                broker.poll_interval,
+                config.keys.clone(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("broker connect error: {e}"))?
+        }
+    };
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -2017,19 +2055,30 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("failed to set startup watermark: {e}");
     }
 
-    tracing::info!("connected to relay at {}", config.relay_url);
+    match config.agent_mode {
+        AgentMode::Local => tracing::info!("connected to relay at {}", config.relay_url),
+        AgentMode::Broker => tracing::info!("connected to broker as {pubkey_hex}"),
+    }
 
     relay
         .subscribe_membership_notifications()
         .await
         .map_err(|e| anyhow::anyhow!("membership notification subscribe error: {e}"))?;
-    tracing::info!("subscribed to membership notifications");
+    match config.agent_mode {
+        AgentMode::Local => tracing::info!("subscribed to membership notifications"),
+        AgentMode::Broker => tracing::info!(
+            "broker contract has no membership notifications; using configured channels"
+        ),
+    }
 
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
-    let startup_owner: Option<String> = resolve_agent_owner(&config);
+    let startup_owner: Option<String> = match config.agent_mode {
+        AgentMode::Local => resolve_agent_owner(&config),
+        AgentMode::Broker => config.agent_owner.clone(),
+    };
     if let Some(ref owner) = startup_owner {
         tracing::info!("agent owner: {owner}");
     } else {
@@ -2192,6 +2241,10 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
+    let channel_info = match config.agent_mode {
+        AgentMode::Local => pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
+        AgentMode::Broker => pool::ChannelInfoResolver::without_fallback(channel_info_map),
+    };
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2211,15 +2264,20 @@ async fn tokio_main() -> Result<()> {
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
         cwd,
+        relay_features_enabled: config.agent_mode == AgentMode::Local,
         rest_client: relay.rest_client(),
-        channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
+        channel_info,
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
         agent_keys: config.keys.clone(),
-        agent_owner_pubkey: startup_owner
-            .as_deref()
-            .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
+        agent_owner_pubkey: (config.agent_mode == AgentMode::Local)
+            .then(|| {
+                startup_owner
+                    .as_deref()
+                    .and_then(|hex| nostr::PublicKey::from_hex(hex).ok())
+            })
+            .flatten(),
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
@@ -2930,7 +2988,7 @@ async fn tokio_main() -> Result<()> {
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            if accepted && config.agent_mode == AgentMode::Local {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
@@ -3161,7 +3219,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
-                    Some(&ctx.rest_client),
+                    (config.agent_mode == AgentMode::Local).then_some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -5079,31 +5137,53 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
+            let mut env = match config.agent_mode {
+                AgentMode::Local => vec![
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ],
+                AgentMode::Broker => {
+                    let broker = config
+                        .broker
+                        .as_ref()
+                        .expect("broker config validated for broker mode");
+                    vec![
+                        EnvVar {
+                            name: "BUZZ_AGENT_MODE".into(),
+                            value: "broker".into(),
+                        },
+                        EnvVar {
+                            name: "BUZZ_BROKER_URL".into(),
+                            value: broker.base_url.clone(),
+                        },
+                        EnvVar {
+                            name: "BUZZ_BROKER_CREDENTIAL".into(),
+                            value: broker.credential.clone(),
+                        },
+                    ]
+                }
+            };
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
             // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
+            if config.agent_mode == AgentMode::Local {
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
                 }
             }
             // Forward the agent's display name so dev-mcp can use it as the git
@@ -6792,6 +6872,8 @@ mod build_mcp_servers_tests {
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            agent_mode: config::AgentMode::Local,
+            broker: None,
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
@@ -6854,6 +6936,27 @@ mod build_mcp_servers_tests {
             names.contains(&"BUZZ_PRIVATE_KEY"),
             "missing BUZZ_PRIVATE_KEY; got {names:?}"
         );
+    }
+
+    #[test]
+    fn broker_mcp_server_receives_only_broker_credentials() {
+        let mut config = test_config();
+        config.agent_mode = config::AgentMode::Broker;
+        config.broker = Some(config::BrokerConfig {
+            base_url: "http://127.0.0.1:8787".into(),
+            credential: "broker-token".into(),
+            poll_interval: std::time::Duration::from_secs(1),
+        });
+
+        let servers = build_mcp_servers(&config);
+        let server = &servers[0];
+        let names: Vec<&str> = server.env.iter().map(|env| env.name.as_str()).collect();
+        assert!(names.contains(&"BUZZ_AGENT_MODE"));
+        assert!(names.contains(&"BUZZ_BROKER_URL"));
+        assert!(names.contains(&"BUZZ_BROKER_CREDENTIAL"));
+        assert!(!names.contains(&"BUZZ_RELAY_URL"));
+        assert!(!names.contains(&"BUZZ_PRIVATE_KEY"));
+        assert!(!names.contains(&"BUZZ_AUTH_TAG"));
     }
 
     #[test]
@@ -7013,6 +7116,8 @@ mod error_outcome_emission_tests {
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            agent_mode: config::AgentMode::Local,
+            broker: None,
             relay_url: "ws://localhost:3000".into(),
             // `true` exits cleanly, so the async respawn fails fast and
             // harmlessly off the JoinSet — irrelevant to the synchronous

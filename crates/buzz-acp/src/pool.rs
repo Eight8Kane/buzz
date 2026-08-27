@@ -559,7 +559,7 @@ const PROJECT_INFO_CACHE_TTL: std::time::Duration = std::time::Duration::from_se
 pub struct ChannelInfoResolver {
     cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, PromptChannelInfo>>>,
     projects: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, CachedProjectInfo>>>,
-    rest_client: RestClient,
+    rest_client: Option<RestClient>,
 }
 
 impl ChannelInfoResolver {
@@ -584,7 +584,33 @@ impl ChannelInfoResolver {
         Self {
             cache: std::sync::Arc::new(std::sync::RwLock::new(cache)),
             projects: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-            rest_client,
+            rest_client: Some(rest_client),
+        }
+    }
+
+    /// Build a resolver that never falls back to a direct relay metadata read.
+    ///
+    /// Broker mode uses this constructor because the client has no relay route.
+    /// Unknown channel types therefore remain unresolved and callers fail closed.
+    pub fn without_fallback(startup: std::collections::HashMap<Uuid, ChannelInfo>) -> Self {
+        let cache = startup
+            .into_iter()
+            .filter_map(|(id, info)| {
+                (info.channel_type != "unknown").then_some((
+                    id,
+                    PromptChannelInfo {
+                        name: info.name,
+                        channel_type: info.channel_type,
+                        description: info.description,
+                        project: None,
+                    },
+                ))
+            })
+            .collect();
+        Self {
+            cache: std::sync::Arc::new(std::sync::RwLock::new(cache)),
+            projects: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            rest_client: None,
         }
     }
 
@@ -597,7 +623,8 @@ impl ChannelInfoResolver {
         {
             return Some(info);
         }
-        let info = fetch_channel_info(channel_id, &self.rest_client).await?;
+        let rest_client = self.rest_client.as_ref()?;
+        let info = fetch_channel_info(channel_id, rest_client).await?;
         if let Ok(mut cache) = self.cache.write() {
             cache.insert(channel_id, info.clone());
         }
@@ -630,7 +657,11 @@ impl ChannelInfoResolver {
         {
             return Ok(fresh.value.clone());
         }
-        let fetched = match fetch_project_home_for_channel(channel_id, &self.rest_client).await {
+        // Broker mode has no relay/REST route: no project context, fail closed.
+        let Some(rest_client) = self.rest_client.as_ref() else {
+            return Ok(None);
+        };
+        let fetched = match fetch_project_home_for_channel(channel_id, rest_client).await {
             Ok(fetched) => fetched,
             Err(error) => {
                 if let Some(project) = cached.and_then(|stale| stale.value) {
@@ -681,6 +712,9 @@ pub struct PromptContext {
     /// (`include_str!`) is inherently `'static`.
     pub base_prompt: Option<&'static str>,
     pub cwd: String,
+    /// Whether direct relay-only enrichments and housekeeping are available.
+    /// False in broker mode, where the runtime has no relay route.
+    pub relay_features_enabled: bool,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
     /// Shared channel metadata for startup-known and dynamically joined channels.
@@ -1921,7 +1955,9 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
-    let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+    let _reaction_guard = ctx
+        .relay_features_enabled
+        .then(|| ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone()));
 
     // Resolve project authority exactly once, before any ACP session creation or
     // initial-message delivery. An indeterminate result is a local relay-state
@@ -2040,13 +2076,15 @@ pub async fn run_prompt_task(
                 resolve_new_session_channel_context(resolved_channel_info.as_ref()).await;
             title_channel = resolved_channel;
             origin_channel_type = resolved_channel_type;
-            if let Some(owner) = ctx.agent_owner_pubkey.as_ref() {
-                huddle_instructions =
-                    fetch_huddle_instructions(*cid, owner, &ctx.rest_client).await;
+            if ctx.relay_features_enabled {
+                if let Some(owner) = ctx.agent_owner_pubkey.as_ref() {
+                    huddle_instructions =
+                        fetch_huddle_instructions(*cid, owner, &ctx.rest_client).await;
+                }
             }
             // A confirmed DM never receives a canvas section; an undeterminable
             // channel type fails closed as a DM for the same reason.
-            if needs_canvas && !is_dm {
+            if ctx.relay_features_enabled && needs_canvas && !is_dm {
                 if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
                     pending_canvas = Some((*cid, section));
                 }
@@ -2464,8 +2502,11 @@ pub async fn run_prompt_task(
             conversation_context.as_ref(),
         ));
 
-        let profile_lookup =
-            fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+        let profile_lookup = if ctx.relay_features_enabled {
+            fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await
+        } else {
+            None
+        };
 
         let known_names: Vec<&str> = profile_lookup
             .iter()
@@ -2518,7 +2559,7 @@ pub async fn run_prompt_task(
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
     // A brief race where 💬 appears slightly after the agent starts is acceptable.
-    if !reaction_ids.is_empty() {
+    if ctx.relay_features_enabled && !reaction_ids.is_empty() {
         let rest = ctx.rest_client.clone();
         let ids = reaction_ids.clone();
         tokio::spawn(async move {
@@ -3467,6 +3508,9 @@ async fn fetch_conversation_context(
     channel_info: &Option<PromptChannelInfo>,
     ctx: &PromptContext,
 ) -> Option<ConversationContext> {
+    if !ctx.relay_features_enabled {
+        return None;
+    }
     let limit = ctx.context_message_limit;
     let is_dm = channel_info
         .as_ref()
@@ -8182,6 +8226,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             heartbeat_prompt: None,
             base_prompt: None,
             cwd: ".".to_string(),
+            relay_features_enabled: true,
             rest_client: RestClient {
                 http: reqwest::Client::new(),
                 base_url: "http://127.0.0.1:0".to_string(),

@@ -508,7 +508,19 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var_os(key).is_none() {
+            // Substrate provisioning is a security boundary, not a persona
+            // preference. Broker mode must override inherited local relay/key
+            // values, including with empty tombstones.
+            let force_runtime_provisioning = matches!(
+                key.as_str(),
+                "BUZZ_AGENT_MODE"
+                    | "BUZZ_BROKER_URL"
+                    | "BUZZ_BROKER_CREDENTIAL"
+                    | "BUZZ_RELAY_URL"
+                    | "BUZZ_PRIVATE_KEY"
+                    | "BUZZ_AUTH_TAG"
+            );
+            if force_runtime_provisioning || std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
         }

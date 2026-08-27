@@ -18,9 +18,9 @@ use buzz_sdk::broker::{
 };
 use buzz_sdk::ThreadRef;
 
-use crate::broker_client::HttpBrokerClient;
 use crate::client::BuzzClient;
 use crate::error::CliError;
+use buzz_broker_client::HttpBrokerClient;
 
 /// The operations an agent performs, in the broker's vocabulary.
 ///

@@ -16,6 +16,13 @@ path), `messages send` / reply, `reactions add`, `users set-profile`, and
 `mem address <slug>` as an addressing-only bridge for encrypted memory. Every
 other command still needs the local backend.
 
+The same provisioning variables now select the prototype keyless `buzz-acp`
+runtime. It derives its public identity through `storage.address`, polls
+configured channels through `channel.read`, and passes broker provisioning to
+the CLI used by the spawned agent. See
+[`../buzz-acp/README.md`](../buzz-acp/README.md#keyless-broker-mode-prototype)
+for the runtime command and its deliberate housekeeping limits.
+
 ## Build
 
 ```sh

@@ -1,9 +1,13 @@
 # buzz-acp
 
-ACP harness that connects AI agents to Buzz. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Buzz CLI.
+ACP harness that connects AI agents to Buzz. In local mode the harness listens
+for @mentions on the relay. In keyless broker mode it polls a host that owns the
+agent key and relay route. Both modes prompt the same ACP agent, which replies
+using the Buzz CLI.
 
 ```
-Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
+Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent       (local)
+Broker Host ─HTTP→ buzz-acp ──stdio──→ Your Agent       (keyless)
                                                │
                                           Buzz CLI
                                        (send_message, etc.)
@@ -64,6 +68,34 @@ buzz-acp
 
 That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Buzz CLI that the harness configures automatically.
 
+## Keyless broker mode (prototype)
+
+Broker mode starts the runtime without an agent private key or direct relay
+connection. The harness derives the agent public key through `storage.address`,
+polls each configured channel through `channel.read`, and provisions the spawned
+agent and optional MCP server with broker variables so their `buzz` commands use
+the same host.
+
+```bash
+export BUZZ_AGENT_MODE=broker
+export BUZZ_BROKER_URL=http://127.0.0.1:8787
+export BUZZ_BROKER_CREDENTIAL=dev-token
+export BUZZ_ACP_CHANNELS=5df7dfa8-e919-43df-8efd-f1dcb8af7071
+export BUZZ_ACP_AGENT_OWNER=a02c4e0850e5e612b4ddf95dbe2f5c56467cf27c6552203bc833ff438fb31971
+unset BUZZ_PRIVATE_KEY BUZZ_RELAY_URL BUZZ_AUTH_TAG
+
+buzz-acp
+```
+
+This slice is intentionally receive-and-reply focused. Because the frozen
+broker contract does not expose channel discovery, channel metadata, profiles,
+or runtime housekeeping operations, broker mode currently requires explicit
+channel UUIDs and `respond-to=owner-only`. Presence, typing, reactions used as
+turn status, observer/liveness events, relay conversation enrichment, setup
+nudges, and core-memory injection are disabled. The `buzz` CLI operations
+available to the spawned agent are documented in
+[`../buzz-cli/KEYLESS.md`](../buzz-cli/KEYLESS.md).
+
 ## Running with Codex
 
 [codex-acp](https://github.com/agentclientprotocol/codex-acp) wraps OpenAI Codex in an ACP interface.
@@ -106,8 +138,14 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BUZZ_PRIVATE_KEY` | **yes** | — | Agent's Nostr private key (`nsec1...`). Used for relay auth and agent identity. |
+| `BUZZ_AGENT_MODE` | no | `local` | Runtime substrate: `local` or keyless `broker`. |
+| `BUZZ_PRIVATE_KEY` | local only | — | Agent's Nostr private key (`nsec1...`). Rejected in broker mode. |
 | `BUZZ_RELAY_URL` | no | `ws://localhost:3000` | Relay WebSocket URL. |
+| `BUZZ_BROKER_URL` | broker only | — | Broker base URL; actions are posted to `/v1/action`. |
+| `BUZZ_BROKER_CREDENTIAL` | broker only | — | Bearer credential issued by the broker host. |
+| `BUZZ_BROKER_POLL_INTERVAL_MS` | no | `1000` | Broker `channel.read` polling interval; minimum `100`. |
+| `BUZZ_ACP_CHANNELS` | broker only | — | Comma-separated channel UUIDs to poll. |
+| `BUZZ_ACP_AGENT_OWNER` | broker only | — | Owner pubkey accepted by the broker-mode author gate. |
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |

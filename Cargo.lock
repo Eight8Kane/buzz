@@ -830,6 +830,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "buzz-broker-client",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
@@ -970,11 +971,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-broker-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "buzz-sdk",
+ "reqwest 0.13.4",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "buzz-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "buzz-broker-client",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",

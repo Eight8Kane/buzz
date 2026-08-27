@@ -658,6 +658,14 @@ impl RelayEventPublisher {
             .map_err(|_| RelayError::ConnectionClosed)
     }
 
+    /// A publisher with no relay behind it. Used only by broker-mode plumbing
+    /// for code paths disabled by provisioning (presence, typing, observer).
+    pub(crate) fn disabled() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        drop(cmd_rx);
+        Self { cmd_tx }
+    }
+
     /// Test-only publisher pair: published events are forwarded to the
     /// returned receiver instead of a live relay socket.
     #[cfg(test)]

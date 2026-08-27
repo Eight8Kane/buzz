@@ -1,14 +1,9 @@
-//! HTTP transport for the agent broker — keyless client mode.
+//! Shared HTTP transport for the agent broker.
 //!
 //! Implements [`buzz_sdk::broker::BrokerClient`], the transport primitive the
 //! contract crate deliberately omits: frozen request bytes out, one envelope
 //! back. Callers use [`buzz_sdk::broker::BrokerClientExt::execute`], which adds
-//! the correlation checks; this type must never interpret a verdict.
-//!
-//! The binding is one `POST /v1/action` with the opaque bearer credential in
-//! the `Authorization` header. An envelope is parsed regardless of HTTP status,
-//! because a host verdict lives in the body and an intermediary may remap the
-//! status line.
+//! correlation checks; this type never interprets a verdict.
 
 use buzz_sdk::broker::{
     BrokerClient, BrokerFuture, BrokerResponse, BrokerTransportError, Dispatch, PreparedRequest,
@@ -26,8 +21,7 @@ pub struct HttpBrokerClient {
 }
 
 impl HttpBrokerClient {
-    /// A client posting to `base_url` (scheme + authority, no path) with
-    /// `credential` as its bearer token.
+    /// A client posting to `base_url` with `credential` as its bearer token.
     pub fn new(base_url: impl Into<String>, credential: impl Into<String>) -> Self {
         Self::with_client(base_url, credential, reqwest::Client::new())
     }
@@ -175,16 +169,12 @@ mod tests {
             r#"{{"type":"broker_result","protocolVersion":1,"requestId":"{}","status":"failed","error":{{"code":"unauthenticated","message":"nope"}}}}"#,
             req.request_id(),
         );
-        // A rejected credential arrives as HTTP 200 with a Failed envelope.
         let (base, _) = spawn(StatusCode::OK, body).await;
 
         let client = HttpBrokerClient::new(base, CRED);
         let validated = client.execute(&req).await.expect("a verdict");
 
-        match validated.result() {
-            BrokerResult::Failed { .. } => {}
-            other => panic!("expected Failed, got {other:?}"),
-        }
+        assert!(matches!(validated.result(), BrokerResult::Failed { .. }));
     }
 
     #[tokio::test]
