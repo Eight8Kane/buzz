@@ -28,6 +28,10 @@ const bestie = {
   relayUrl: RELAY_A,
   status: "running" as const,
 };
+const bestieInCommunityB = {
+  ...bestie,
+  relayUrl: COMMUNITY_B.relayUrl,
+};
 
 async function seedCommunities(
   page: import("@playwright/test").Page,
@@ -443,4 +447,116 @@ test("a message can be handed to Bestie with an optional note", async ({
     "Make sure product and engineering agree on the owner.",
   );
   await expect(sentMessage).toContainText("Open original message");
+});
+
+test("a Bestie handoff fails closed across a community switch and preserves its draft", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      managedAgents: [bestie, bestieInCommunityB],
+      sendMessageDelayMs: 1_000,
+    },
+    { skipCommunitySeed: true },
+  );
+  await seedCommunities(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const messageId = await page.evaluate(() => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    return emit({
+      channelName: "general",
+      content: "Keep this handoff in its original community",
+      id: "e".repeat(64),
+    }).id;
+  });
+
+  const draft = "This note must stay in Alpha.";
+  const row = page.locator(`[data-message-id="${messageId}"]`);
+  await row.hover();
+  await row.getByTestId(`send-to-bestie-${messageId}`).click();
+  const popover = page.getByTestId(`bestie-popover-${messageId}`);
+  const editor = popover.locator('[contenteditable="true"]');
+  await editor.fill(draft);
+  await popover.getByRole("button", { name: "Send" }).click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_COMMAND_LOG__?.findLast(
+            (entry) => entry.command === "send_channel_message",
+          )?.payload,
+      ),
+    )
+    .toMatchObject({
+      content: expect.stringContaining(draft),
+      expectedRelayUrl: RELAY_A,
+      expectedSignerPubkey: OWNER_PUBKEY,
+    });
+
+  await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-active-community-id"),
+      ),
+    )
+    .toBe(COMMUNITY_B.id);
+  await page.waitForTimeout(1_150);
+
+  // The two fixtures intentionally resolve to the same participant-derived
+  // DM id. An unscoped send would therefore appear in both tenant views.
+  await page
+    .getByTestId("sidebar-channel-content")
+    .getByRole("button", { name: /Bestie/ })
+    .first()
+    .click();
+  await expect(page.getByTestId("chat-title")).toHaveText("Bestie");
+  await expect(page.getByTestId("message-timeline")).not.toContainText(draft);
+
+  await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-active-community-id"),
+      ),
+    )
+    .toBe(COMMUNITY_A.id);
+  await page
+    .getByTestId("sidebar-channel-content")
+    .getByRole("button", { name: /Bestie/ })
+    .first()
+    .click();
+  await expect(page.getByTestId("chat-title")).toHaveText("Bestie");
+  await expect(page.getByTestId("message-timeline")).not.toContainText(draft);
+
+  await page.getByTestId("channel-general").click();
+  await page.evaluate((id) => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    emit({
+      channelName: "general",
+      content: "Keep this handoff in its original community",
+      id,
+    });
+  }, messageId);
+  const restoredRow = page.locator(`[data-message-id="${messageId}"]`);
+  await restoredRow.hover();
+  await restoredRow.getByTestId(`send-to-bestie-${messageId}`).click();
+  const restoredPopover = page.getByTestId(`bestie-popover-${messageId}`);
+  await expect(restoredPopover.locator('[contenteditable="true"]')).toHaveText(
+    draft,
+  );
+  await page.evaluate(() => {
+    if (window.__BUZZ_E2E__?.mock) {
+      window.__BUZZ_E2E__.mock.sendMessageDelayMs = 0;
+    }
+  });
+  await restoredPopover.getByRole("button", { name: "Send" }).click();
+  await expect(restoredPopover).toBeHidden();
+  await page.getByTestId("open-bestie-dm").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(draft);
 });

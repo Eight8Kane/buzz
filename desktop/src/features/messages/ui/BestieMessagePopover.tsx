@@ -50,6 +50,19 @@ export function BestieMessagePanel({
     mentionPubkeys: string[],
     mediaTags?: string[][],
   ) => {
+    // The action can outlive its rendered community while opening the DM and
+    // preparing optimistic state. Capture both ownership dimensions before
+    // the first await and require the backend to reject publication if either
+    // one changes in flight.
+    const expectedRelayUrl = activeCommunity?.relayUrl;
+    const expectedSignerPubkey = identityQuery.data?.pubkey;
+    if (!expectedRelayUrl || !expectedSignerPubkey) {
+      const error = new Error(
+        "Bestie messages require an active community and signing identity.",
+      );
+      toast.error(`Couldn't send to ${bestie.name}`);
+      throw error;
+    }
     const { rootId } = getThreadReference(message.tags ?? []);
     const link = buildMessageLink({
       channelId,
@@ -64,14 +77,17 @@ export function BestieMessagePanel({
     try {
       const dm = await openDmMutation.mutateAsync({
         pubkeys: [bestie.pubkey],
-        expectedRelayUrl: activeCommunity?.relayUrl,
-        expectedSignerPubkey: identityQuery.data?.pubkey,
+        expectedRelayUrl,
+        expectedSignerPubkey,
       });
       await sendMessageMutation.mutateAsync({
         content,
+        expectedRelayUrl,
+        expectedSignerPubkey,
         mediaTags,
         mentionPubkeys,
         targetChannel: dm,
+        transport: "http",
       });
       onClose();
       toast.success(`Sent to ${bestie.name}`);
