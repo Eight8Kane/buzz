@@ -14,6 +14,7 @@ import '../profile/user_status_cache_provider.dart';
 import 'agent_activity/agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 
 class MembersSheet extends HookConsumerWidget {
@@ -216,18 +217,28 @@ class _MemberTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final label = isSelf
+    final name = isSelf
         ? 'You'
         : (profile?.displayName?.trim().isNotEmpty == true
               ? profile!.displayName!.trim()
               : member.labelFor(currentPubkey));
-    final initial = label.substring(0, 1).toUpperCase();
+    final label = _watchContextualLabel(ref);
+    // Named members initial from their name; unnamed ones stay keyed to the
+    // hex public key so the compact-npub label doesn't render `N` for all.
+    final hasName = profile?.displayName?.trim().isNotEmpty == true;
+    final initial = isSelf || hasName
+        ? name[0].toUpperCase()
+        : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
     final showManagementActions = canManage && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
 
     return ListTile(
       contentPadding: EdgeInsets.zero,
-      leading: _MemberAvatar(avatarUrl: profile?.avatarUrl, initial: initial),
+      leading: _MemberAvatar(
+        avatarUrl: profile?.avatarUrl,
+        initial: initial,
+        isAgent: member.isBot || profile?.isAgent == true,
+      ),
       title: Text(label),
       subtitle: isWorking
           ? Row(
@@ -278,6 +289,10 @@ class _MemberTile extends ConsumerWidget {
     );
   }
 
+  /// 'You' for the viewer; otherwise the channel's contextual label.
+  String _watchContextualLabel(WidgetRef ref) =>
+      isSelf ? 'You' : watchChannelIdentityLabel(ref, channelId, member.pubkey);
+
   void _showMemberActions(
     BuildContext context,
     WidgetRef ref, {
@@ -285,9 +300,9 @@ class _MemberTile extends ConsumerWidget {
   }) {
     final label = isSelf
         ? 'You'
-        : (profile?.displayName?.trim().isNotEmpty == true
-              ? profile!.displayName!.trim()
-              : member.labelFor(currentPubkey));
+        : ref
+              .read(channelIdentityNamesProvider(channelId))
+              .labelFor(member.pubkey);
     final canChangeRole = showManagementActions && !member.isBot;
     showBuzzModalBottomSheet<void>(
       context: context,
@@ -439,8 +454,13 @@ class _RoleSelector extends StatelessWidget {
 class _MemberAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
+  final bool isAgent;
 
-  const _MemberAvatar({required this.avatarUrl, required this.initial});
+  const _MemberAvatar({
+    required this.avatarUrl,
+    required this.initial,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -448,6 +468,7 @@ class _MemberAvatar extends StatelessWidget {
       imageUrl: avatarUrl,
       radius: 20,
       fallback: Text(initial),
+      isAgent: isAgent,
     );
   }
 }
