@@ -4956,6 +4956,36 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Claude subscription limits cannot be repaired by retrying the same batch.
+/// Only echo a short, validated reset label; never relay an arbitrary provider
+/// error into a channel message.
+fn usage_limit_notice(error: &acp::AcpError) -> Option<String> {
+    let acp::AcpError::AgentError { message, .. } = error else {
+        return None;
+    };
+    if !message.contains("You've hit your session limit")
+        && !message.contains("You've hit your weekly limit")
+    {
+        return None;
+    }
+    let reset = message
+        .split_once("· resets ")
+        .map(|(_, value)| value.lines().next().unwrap_or("").trim())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 48
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || " :/()+-.".contains(c))
+        });
+    let when = reset
+        .map(|value| format!(" It resets at {value}."))
+        .unwrap_or_default();
+    Some(format!(
+        "⚠️ I couldn't process this request because Claude's usage limit was reached.{when} Please re-send the request after the limit resets; it will not run automatically."
+    ))
+}
+
 /// Thread placement for a batch's terminal failure notice.
 ///
 /// Ordinary events keep their own thread tags. An edit follows its verified
@@ -5163,6 +5193,20 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+            } else if let PromptOutcome::Error(ref error) = result.outcome {
+                if let Some(content) = usage_limit_notice(error) {
+                    tracing::warn!(
+                        channel_id = %batch.channel_id,
+                        events = batch.events.len(),
+                        "dead-lettering batch immediately — model usage limit"
+                    );
+                    spawn_failure_notice(rest_client, &batch, content);
+                } else if let Some(dead) = queue.requeue(batch) {
+                    let content = format!(
+                        "⚠️ I couldn't process the last request after multiple retries ({error}). Please re-send if it's still needed."
+                    );
+                    spawn_failure_notice(rest_client, &dead, content);
+                }
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -11492,6 +11536,32 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[test]
+    fn usage_limit_notice_includes_only_a_valid_reset_time() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error: You've hit your session limit · resets 11:20pm (Asia/Seoul)"
+                .to_string(),
+        };
+        let notice = usage_limit_notice(&error).unwrap();
+        assert!(notice.contains("11:20pm (Asia/Seoul)"));
+        assert!(notice.contains("will not run automatically"));
+        assert!(!notice.contains("Internal error"));
+
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "You've hit your weekly limit · resets <script>alert(1)</script>".to_string(),
+        };
+        let notice = usage_limit_notice(&error).unwrap();
+        assert!(!notice.contains("<script>"));
+        assert!(!notice.contains("resets at"));
+        assert!(usage_limit_notice(&acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error: timeout".to_string(),
+        })
+        .is_none());
+    }
+
     // ── auth error dead-letter behavior ────────────────────────────────────
 
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
@@ -11600,6 +11670,25 @@ mod error_outcome_emission_tests {
         edit: Option<queue::ResolvedEdit>,
         lookup: serde_json::Value,
     ) -> (nostr::Event, relay::RestClient, uuid::Uuid) {
+        let raw_error = r#"llm model not found: (gpt-6-astra) 404 Not Found: {"error_code":"NOT_FOUND","message":"'gpt-6-astra' does not exist."}"#;
+        capture_terminal_error_notice(
+            event,
+            edit,
+            lookup,
+            AcpError::AgentError {
+                code: -32002,
+                message: raw_error.to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn capture_terminal_error_notice(
+        event: nostr::Event,
+        edit: Option<queue::ResolvedEdit>,
+        lookup: serde_json::Value,
+        model_error: AcpError,
+    ) -> (nostr::Event, relay::RestClient, uuid::Uuid) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -11623,10 +11712,9 @@ mod error_outcome_emission_tests {
             cancel_reason: None,
         };
 
-        let raw_error = r#"llm model not found: (gpt-6-astra) 404 Not Found: {"error_code":"NOT_FOUND","message":"'gpt-6-astra' does not exist."}"#;
-        let model_error = AcpError::AgentError {
-            code: -32002,
-            message: raw_error.to_string(),
+        let error_code = match &model_error {
+            AcpError::AgentError { code, .. } => *code,
+            _ => panic!("terminal notice test expects an agent error"),
         };
         let expected_error = model_error.to_string();
         let observer = ObserverHandle::in_process();
@@ -11683,12 +11771,12 @@ mod error_outcome_emission_tests {
         assert_eq!(
             queue.pending_channels(),
             0,
-            "model-not-found must stop immediately — batch must not be requeued"
+            "terminal error must stop immediately — batch must not be requeued"
         );
         assert_eq!(
             queue.queued_event_count(channel_id),
             0,
-            "model-not-found must stop immediately — no events should be pending"
+            "terminal error must stop immediately — no events should be pending"
         );
 
         assert!(
@@ -11702,7 +11790,7 @@ mod error_outcome_emission_tests {
             .filter(|event| event.kind == "turn_error")
             .collect();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].payload["code"], -32002);
+        assert_eq!(errors[0].payload["code"], error_code);
         assert_eq!(errors[0].payload["error"], expected_error);
 
         // Capture the real signed notice sent by handle_prompt_result, without a live relay.
@@ -11751,6 +11839,47 @@ mod error_outcome_emission_tests {
         .await
         .expect("failure notice must be posted on the first failure");
         (notice, rest, channel_id)
+    }
+
+    #[tokio::test]
+    async fn usage_limit_posts_immediate_threaded_notice() {
+        let keys = Keys::generate();
+        let root = nostr::EventId::from_byte_array([0xaa; 32]);
+        let parent = nostr::EventId::from_byte_array([0xbb; 32]);
+        let event = EventBuilder::new(Kind::Custom(9), "test")
+            .tags([
+                nostr::Tag::parse(["e", &root.to_hex(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let (notice, rest, channel_id) = capture_terminal_error_notice(
+            event,
+            None,
+            serde_json::json!([]),
+            AcpError::AgentError {
+                code: -32603,
+                message:
+                    "Internal error: You've hit your session limit · resets 11:20pm (Asia/Seoul)"
+                        .to_string(),
+            },
+        )
+        .await;
+        notice.verify().unwrap();
+        assert_eq!(notice.pubkey, rest.keys.public_key());
+        assert_eq!(notice.kind, Kind::Custom(9));
+        assert!(notice.content.contains("11:20pm (Asia/Seoul)"));
+        assert!(notice.content.contains("will not run automatically"));
+        assert!(!notice.content.contains("Internal error"));
+        let tags = serde_json::to_value(&notice.tags).unwrap();
+        assert!(tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag[0] == "h" && tag[1] == channel_id.to_string()));
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.to_hex()));
+        assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
     }
 
     #[tokio::test]
